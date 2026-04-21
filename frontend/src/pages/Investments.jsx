@@ -1,0 +1,450 @@
+import { useState, useEffect, useRef } from 'react';
+import {
+  Table, Button, Modal, Form, Input, Select, DatePicker, InputNumber,
+  Space, Tag, message, Typography, Row, Col, Switch, Tooltip, Card, Descriptions, Spin, Divider,
+} from 'antd';
+import {
+  PlusOutlined, SearchOutlined,
+  CheckCircleOutlined, ClockCircleOutlined, MinusCircleOutlined,
+} from '@ant-design/icons';
+import dayjs from 'dayjs';
+import {
+  getInvestments, createInvestment, searchShareholders, getShareholders,
+  getShareholderInvestmentSummary, getBankCapital,
+} from '../services/api';
+import { formatCurrency, paymentMethods } from '../utils/format';
+import { formatEthiopianDate } from '../utils/ethiopianDate';
+
+const { Title, Text } = Typography;
+
+const statusColors = { fully_paid: 'green', partially_paid: 'orange', not_started: 'default' };
+const statusLabels = { fully_paid: 'Fully Paid', partially_paid: 'Partially Paid', not_started: 'Not Started' };
+const statusIcons = {
+  fully_paid: <CheckCircleOutlined />,
+  partially_paid: <ClockCircleOutlined />,
+  not_started: <MinusCircleOutlined />,
+};
+
+export default function Investments() {
+  const [data, setData] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [search, setSearch] = useState('');
+  const [methodFilter, setMethodFilter] = useState('');
+  const [statusFilter, setStatusFilter] = useState('');
+  const [modalOpen, setModalOpen] = useState(false);
+  const [shareholders, setShareholders] = useState([]);
+  const [parValue, setParValue] = useState(0);
+  const [summary, setSummary] = useState(null);
+  const [summaryLoading, setSummaryLoading] = useState(false);
+  const [form] = Form.useForm();
+  const lastChanged = useRef(null);
+
+  // Fetch par value from bank capital settings
+  useEffect(() => {
+    getBankCapital().then(res => {
+      setParValue(res.data?.data?.par_value_per_share || 0);
+    }).catch(() => {});
+  }, []);
+
+  const fetchData = async () => {
+    setLoading(true);
+    try {
+      const res = await getInvestments({ page, page_size: 20, search, payment_method: methodFilter, approval_status: statusFilter });
+      setData(res.data.data || []);
+      setTotal(res.data.total || 0);
+    } catch { message.error('Failed to load'); }
+    setLoading(false);
+  };
+
+  useEffect(() => { fetchData(); }, [page, search, methodFilter, statusFilter]);
+
+  const handleShareholderSearch = async (val) => {
+    if (!val || val.length < 1) return;
+    try {
+      const res = await searchShareholders(val);
+      setShareholders((res.data.data || []).map(s => ({
+        value: s.id, label: `${s.account_no} - ${s.first_name} ${s.last_name}`,
+      })));
+    } catch { setShareholders([]); }
+  };
+
+  const handleDropdownOpen = async (open) => {
+    if (open && shareholders.length === 0) {
+      try {
+        const res = await getShareholders({ page: 1, page_size: 50 });
+        setShareholders((res.data.data || []).map(s => ({
+          value: s.id, label: `${s.account_no} - ${s.first_name} ${s.last_name}`,
+        })));
+      } catch { /* ignore */ }
+    }
+  };
+
+  const handleShareholderSelect = async (shId) => {
+    setSummary(null);
+    form.setFieldValue('allocation_id', undefined);
+    if (!shId) return;
+    setSummaryLoading(true);
+    try {
+      const res = await getShareholderInvestmentSummary(shId);
+      setSummary(res.data);
+    } catch { setSummary(null); }
+    setSummaryLoading(false);
+  };
+
+  const handleAllocationSelect = (allocId) => {
+    if (!allocId || !summary?.allocations) return;
+    const alloc = summary.allocations.find(a => a.id === allocId);
+    if (!alloc) return;
+    const remaining = alloc.remaining_amount > 0 ? alloc.remaining_amount : alloc.allocated_amount;
+    const remainingShares = alloc.allocated_shares - alloc.paid_shares;
+    form.setFieldsValue({
+      amount: remaining > 0 ? remaining : undefined,
+      number_of_shares: remainingShares > 0 ? remainingShares : undefined,
+    });
+    lastChanged.current = null;
+  };
+
+  const handlePaymentDateChange = (date) => {
+    if (date) {
+      form.setFieldsValue({ amharic_date: formatEthiopianDate(date.year(), date.month() + 1, date.date()) });
+    }
+  };
+
+  const handleAmountChange = (val) => {
+    if (lastChanged.current === 'shares') return;
+    lastChanged.current = 'amount';
+    form.setFieldValue('number_of_shares', val > 0 && parValue > 0 ? Math.floor(val / parValue) : 0);
+    lastChanged.current = null;
+  };
+
+  const handleSharesChange = (val) => {
+    if (lastChanged.current === 'amount') return;
+    lastChanged.current = 'shares';
+    form.setFieldValue('amount', val > 0 && parValue > 0 ? val * parValue : 0);
+    lastChanged.current = null;
+  };
+
+  const openModal = () => {
+    form.resetFields();
+    form.setFieldValue('par_value', parValue);
+    setSummary(null);
+    setShareholders([]);
+    lastChanged.current = null;
+    setModalOpen(true);
+  };
+
+  const handleSubmit = async (values) => {
+    try {
+      if (values.payment_date) values.payment_date = values.payment_date.toISOString();
+      await createInvestment(values);
+      message.success('Investment recorded, pending approval');
+      setModalOpen(false);
+      form.resetFields();
+      setSummary(null);
+      fetchData();
+    } catch (err) {
+      message.error(err.response?.data?.error || 'Failed');
+    }
+  };
+
+  const allocColumns = [
+    { title: 'Alloc No', dataIndex: 'allocation_no', width: 110 },
+    { title: 'Rnd', dataIndex: 'round', width: 45 },
+    {
+      title: 'Allocated', key: 'allocated',
+      render: (_, r) => (
+        <div>
+          <div style={{ fontWeight: 500 }}>{formatCurrency(r.allocated_amount)}</div>
+          <div style={{ color: '#888', fontSize: 11 }}>{r.allocated_shares?.toLocaleString()} shares</div>
+        </div>
+      ),
+    },
+    {
+      title: 'Paid', key: 'paid',
+      render: (_, r) => (
+        <div>
+          <div style={{ color: '#52c41a', fontWeight: 500 }}>{formatCurrency(r.paid_amount)}</div>
+          <div style={{ color: '#888', fontSize: 11 }}>{r.paid_shares?.toLocaleString()} shares</div>
+        </div>
+      ),
+    },
+    {
+      title: 'Remaining', key: 'remaining',
+      render: (_, r) => (
+        <div>
+          <div style={{ color: r.remaining_amount > 0 ? '#f5222d' : '#52c41a', fontWeight: 500 }}>
+            {formatCurrency(r.remaining_amount)}
+          </div>
+          <div style={{ color: '#888', fontSize: 11 }}>
+            {(r.allocated_shares - r.paid_shares)?.toLocaleString()} shares
+          </div>
+        </div>
+      ),
+    },
+    {
+      title: 'Payment Status', dataIndex: 'payment_status', width: 120,
+      render: (s) => (
+        <Tag icon={statusIcons[s]} color={statusColors[s]}>
+          {statusLabels[s] || s}
+        </Tag>
+      ),
+    },
+    { title: 'Type', dataIndex: 'subscription_type', width: 90, render: (v) => v ? <Tag color="blue">{v}</Tag> : '-' },
+  ];
+
+  const columns = [
+    { title: 'ID', dataIndex: 'id', width: 55 },
+    {
+      title: 'Shareholder', key: 'sh',
+      render: (_, r) => r.shareholder ? `${r.shareholder.account_no} - ${r.shareholder.first_name} ${r.shareholder.last_name}` : '-',
+    },
+    { title: 'Date', dataIndex: 'payment_date', width: 105, render: (d) => d ? dayjs(d).format('YYYY-MM-DD') : '-' },
+    {
+      title: 'Eth. Date', dataIndex: 'amharic_date', width: 115,
+      render: (v, r) => {
+        if (v) return v;
+        if (r.payment_date) {
+          const d = dayjs(r.payment_date);
+          return <Tooltip title="Auto-calculated">{formatEthiopianDate(d.year(), d.month() + 1, d.date())}</Tooltip>;
+        }
+        return '-';
+      },
+    },
+    { title: 'Method', dataIndex: 'payment_method', width: 110 },
+    { title: 'From Account', dataIndex: 'from_account', width: 130, render: (v) => v || '-' },
+    { title: 'Amount', dataIndex: 'amount', render: (v) => formatCurrency(v) },
+    { title: 'Shares', dataIndex: 'number_of_shares', width: 80 },
+    { title: 'Par Value', dataIndex: 'par_value', width: 110, render: (v) => formatCurrency(v) },
+    { title: 'Ref No', dataIndex: 'reference_no', width: 110, render: (v) => v || '-' },
+    {
+      title: 'Approval', dataIndex: 'approval_status', width: 95,
+      render: (s) => <Tag color={s === 'approved' ? 'green' : 'orange'}>{s}</Tag>,
+    },
+  ];
+
+  return (
+    <div>
+      <Row justify="space-between" align="middle" style={{ marginBottom: 16 }}>
+        <Title level={4} style={{ margin: 0 }}>Investments</Title>
+        <Button type="primary" icon={<PlusOutlined />} onClick={openModal}>New Investment</Button>
+      </Row>
+
+      {/* Search & Filter bar */}
+      <Row gutter={16} style={{ marginBottom: 16 }}>
+        <Col span={8}>
+          <Input.Search
+            placeholder="Search by shareholder name or account..."
+            prefix={<SearchOutlined />}
+            allowClear
+            onSearch={(v) => { setSearch(v); setPage(1); }}
+          />
+        </Col>
+        <Col span={4}>
+          <Select
+            placeholder="Filter by method"
+            allowClear
+            style={{ width: '100%' }}
+            options={paymentMethods}
+            onChange={(v) => { setMethodFilter(v || ''); setPage(1); }}
+          />
+        </Col>
+        <Col span={4}>
+          <Select
+            placeholder="Filter by approval"
+            allowClear
+            style={{ width: '100%' }}
+            options={[
+              { value: 'pending', label: 'Pending' },
+              { value: 'approved', label: 'Approved' },
+              { value: 'rejected', label: 'Rejected' },
+            ]}
+            onChange={(v) => { setStatusFilter(v || ''); setPage(1); }}
+          />
+        </Col>
+      </Row>
+
+      <Table dataSource={data} columns={columns} rowKey="id" loading={loading} size="small"
+        pagination={{ current: page, total, pageSize: 20, onChange: setPage, showTotal: (t) => `Total ${t}` }}
+        scroll={{ x: 1400 }} />
+
+      {/* Create Modal */}
+      <Modal title="Record Investment" open={modalOpen} onCancel={() => { setModalOpen(false); setSummary(null); }}
+        footer={null} width={780}>
+        <Form form={form} layout="vertical" onFinish={handleSubmit}>
+
+          {/* Shareholder selector */}
+          <Form.Item name="shareholder_id" label="Shareholder" rules={[{ required: true }]}>
+            <Select
+              showSearch filterOption={false}
+              onSearch={handleShareholderSearch}
+              options={shareholders}
+              onDropdownVisibleChange={handleDropdownOpen}
+              onChange={handleShareholderSelect}
+              placeholder="Search shareholder..."
+            />
+          </Form.Item>
+
+          {/* Shareholder summary card */}
+          {summaryLoading && <Spin style={{ display: 'block', margin: '8px auto 16px' }} />}
+          {summary && !summaryLoading && (
+            <Card
+              size="small"
+              style={{ marginBottom: 16, background: '#fafafa', border: '1px solid #e8e8e8' }}
+              title={
+                <Space>
+                  <Text strong>Shareholder Summary</Text>
+                  <Tag icon={statusIcons[summary.payment_status]} color={statusColors[summary.payment_status]}>
+                    {statusLabels[summary.payment_status]}
+                  </Tag>
+                </Space>
+              }
+            >
+              <Row gutter={16} style={{ marginBottom: 8 }}>
+                <Col span={6}>
+                  <Text type="secondary" style={{ fontSize: 11 }}>SUBSCRIBED</Text>
+                  <div><Text strong>{formatCurrency(summary.total_subscribed)}</Text></div>
+                  <Text type="secondary" style={{ fontSize: 11 }}>{summary.total_subscribed_shares?.toLocaleString()} shares</Text>
+                </Col>
+                <Col span={6}>
+                  <Text type="secondary" style={{ fontSize: 11 }}>ALLOCATED</Text>
+                  <div><Text strong>{formatCurrency(summary.total_allocated_amount)}</Text></div>
+                  <Text type="secondary" style={{ fontSize: 11 }}>{summary.total_allocated_shares?.toLocaleString()} shares</Text>
+                </Col>
+                <Col span={6}>
+                  <Text type="secondary" style={{ fontSize: 11 }}>PAID</Text>
+                  <div><Text strong style={{ color: '#52c41a' }}>{formatCurrency(summary.total_paid)}</Text></div>
+                  <Text type="secondary" style={{ fontSize: 11 }}>{summary.total_shares_paid?.toLocaleString()} shares</Text>
+                </Col>
+                <Col span={6}>
+                  <Text type="secondary" style={{ fontSize: 11 }}>OUTSTANDING</Text>
+                  <div>
+                    <Text strong style={{ color: summary.outstanding_balance > 0 ? '#f5222d' : '#52c41a' }}>
+                      {formatCurrency(summary.outstanding_balance)}
+                    </Text>
+                  </div>
+                </Col>
+              </Row>
+              {summary.allocations?.length > 0 && (
+                <>
+                  <Divider style={{ margin: '8px 0' }} />
+                  <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>ALLOCATIONS</Text>
+                  <Table
+                    dataSource={summary.allocations}
+                    columns={allocColumns}
+                    rowKey="id"
+                    size="small"
+                    pagination={false}
+                    style={{ fontSize: 12 }}
+                  />
+                </>
+              )}
+            </Card>
+          )}
+
+          {/* Allocation selector — only show unpaid/partially paid allocations */}
+          {summary?.allocations?.filter(a => a.payment_status !== 'fully_paid').length > 0 && (
+            <Form.Item
+              name="allocation_id"
+              label="Allocation (which allocation is this payment for?)"
+            >
+              <Select
+                placeholder="Select allocation..."
+                allowClear
+                onChange={handleAllocationSelect}
+                options={summary.allocations
+                  .filter(a => a.payment_status !== 'fully_paid')
+                  .map(a => ({
+                    value: a.id,
+                    label: `${a.allocation_no} | Round ${a.round}${a.subscription_type ? ` | ${a.subscription_type}` : ''} | ${(a.allocated_shares - a.paid_shares)?.toLocaleString()} remaining shares | ${formatCurrency(a.remaining_amount)} [${statusLabels[a.payment_status] || a.payment_status}]`,
+                  }))}
+              />
+            </Form.Item>
+          )}
+
+          {/* Payment details */}
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item name="payment_date" label="Payment Date" rules={[{ required: true }]}>
+                <DatePicker style={{ width: '100%' }} onChange={handlePaymentDateChange} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="amharic_date" label="Ethiopian Date (Auto-filled)"
+                tooltip="Auto-converted. You can override.">
+                <Input placeholder="Auto-fills from date" />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="payment_method" label="Payment Method" rules={[{ required: true }]}>
+                <Select options={paymentMethods} />
+              </Form.Item>
+            </Col>
+          </Row>
+
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item name="from_account" label="From Account / CPO No"
+                tooltip="Bank account, CPO number, or transfer reference">
+                <Input placeholder="Account no or reference..." />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="reference_no" label="Bank Reference No">
+                <Input placeholder="Bank slip / receipt no..." />
+              </Form.Item>
+            </Col>
+          </Row>
+
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item name="amount" label="Amount (ETB)" rules={[{ required: true }]}>
+                <InputNumber
+                  style={{ width: '100%' }} min={0}
+                  formatter={(v) => v ? `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',') : ''}
+                  parser={(v) => v.replace(/,/g, '')}
+                  onChange={handleAmountChange}
+                />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="par_value" label="Par Value (from settings)">
+                <InputNumber style={{ width: '100%' }} disabled />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="premium_value" label="Premium Value">
+                <InputNumber style={{ width: '100%' }} min={0} />
+              </Form.Item>
+            </Col>
+          </Row>
+
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item name="number_of_shares" label="Number of Shares">
+                <InputNumber style={{ width: '100%' }} min={0} precision={0} onChange={handleSharesChange} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="is_standing" label="Standing Instruction" valuePropName="checked">
+                <Switch />
+              </Form.Item>
+            </Col>
+          </Row>
+
+          <Form.Item name="remark" label="Remark">
+            <Input.TextArea rows={2} />
+          </Form.Item>
+
+          <Form.Item style={{ textAlign: 'right', marginBottom: 0 }}>
+            <Space>
+              <Button onClick={() => { setModalOpen(false); setSummary(null); }}>Cancel</Button>
+              <Button type="primary" htmlType="submit">Record</Button>
+            </Space>
+          </Form.Item>
+        </Form>
+      </Modal>
+    </div>
+  );
+}

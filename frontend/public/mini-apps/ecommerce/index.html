@@ -1,0 +1,1229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"/>
+<title>ZB Shop</title>
+<style>
+:root{--primary:#1a3c5e;--primary-dark:#0d2540;--primary-light:#2a5c8a;--gold:#f5a623;--gold-light:#fbbf24;--bg:#f0f4f8;--card:#fff;--text:#1a1a2e;--text2:#555;--text3:#999;--border:#e5e7eb;--success:#10b981;--danger:#ef4444;--radius:14px;--shadow:0 2px 12px rgba(0,0,0,.08);}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden;}
+button{cursor:pointer;border:none;outline:none;font-family:inherit;}
+input,textarea,select{font-family:inherit;outline:none;}
+img{display:block;}
+
+/* ── Layout ── */
+#app{display:flex;flex-direction:column;min-height:100vh;}
+.page{display:none;flex:1;padding-bottom:70px;animation:fadeIn .2s ease;}
+.page.active{display:block;}
+@keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+
+/* ── Bottom Nav ── */
+.bnav{position:fixed;bottom:0;left:0;right:0;height:62px;background:#fff;border-top:1px solid var(--border);display:flex;z-index:80;box-shadow:0 -2px 12px rgba(0,0,0,.06);}
+.bnav-item{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;font-size:10px;font-weight:600;color:var(--text3);transition:color .15s;}
+.bnav-item.active{color:var(--primary);}
+.bnav-item svg{width:22px;height:22px;}
+.bnav-badge{position:absolute;top:-3px;right:-3px;background:var(--gold);color:#fff;font-size:9px;font-weight:800;border-radius:10px;min-width:16px;height:16px;display:flex;align-items:center;justify-content:center;padding:0 4px;}
+
+/* ── Top Header ── */
+.top-header{background:linear-gradient(135deg,var(--primary),var(--primary-dark));padding:14px 16px 12px;display:flex;align-items:center;gap:10px;position:sticky;top:0;z-index:70;}
+.top-header .logo{display:flex;align-items:center;gap:8px;flex:1;}
+.logo-box{width:32px;height:32px;background:var(--gold);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;}
+.logo-name{font-size:16px;font-weight:800;color:#fff;letter-spacing:.5px;}
+.logo-sub{font-size:10px;color:rgba(255,255,255,.55);margin-top:-1px;}
+.header-btn{width:36px;height:36px;border-radius:10px;background:rgba(255,255,255,.12);display:flex;align-items:center;justify-content:center;color:#fff;position:relative;}
+
+/* ── Search bar ── */
+.search-bar{background:#fff;margin:12px 16px 4px;border-radius:12px;display:flex;align-items:center;gap:8px;padding:10px 14px;box-shadow:var(--shadow);}
+.search-bar input{flex:1;border:none;font-size:14px;color:var(--text);background:transparent;}
+.search-bar input::placeholder{color:var(--text3);}
+
+/* ── Section ── */
+.section{padding:16px 16px 0;}
+.section-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;}
+.section-title{font-size:15px;font-weight:700;color:var(--text);}
+.see-all{font-size:12px;color:var(--primary);font-weight:600;}
+
+/* ── Hero Banner ── */
+.hero{margin:12px 16px;border-radius:var(--radius);overflow:hidden;background:linear-gradient(135deg,var(--primary),var(--primary-light));padding:20px;position:relative;}
+.hero-tag{font-size:10px;font-weight:700;color:var(--gold);text-transform:uppercase;letter-spacing:1px;}
+.hero-title{font-size:20px;font-weight:800;color:#fff;margin:6px 0 4px;line-height:1.2;}
+.hero-sub{font-size:12px;color:rgba(255,255,255,.65);}
+.hero-btn{margin-top:14px;background:var(--gold);color:#fff;border-radius:20px;padding:8px 20px;font-size:13px;font-weight:700;display:inline-block;}
+.hero-emoji{position:absolute;right:16px;top:50%;transform:translateY(-50%);font-size:64px;opacity:.9;}
+
+/* ── Category Chips ── */
+.cat-scroll{overflow-x:auto;display:flex;gap:8px;padding:4px 16px 4px;scrollbar-width:none;}
+.cat-scroll::-webkit-scrollbar{display:none;}
+.cat-chip{flex-shrink:0;background:#fff;border:1.5px solid var(--border);border-radius:20px;padding:7px 14px;font-size:12px;font-weight:600;color:var(--text2);display:flex;align-items:center;gap:5px;white-space:nowrap;transition:all .15s;}
+.cat-chip.active{background:var(--primary);border-color:var(--primary);color:#fff;}
+
+/* ── Product Card ── */
+.product-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;}
+.product-card{background:#fff;border-radius:var(--radius);overflow:hidden;box-shadow:var(--shadow);transition:transform .15s;}
+.product-card:active{transform:scale(.97);}
+.product-img{height:130px;display:flex;align-items:center;justify-content:center;font-size:52px;background:linear-gradient(135deg,#f0f4f8,#e8edf3);position:relative;}
+.badge-tag{position:absolute;top:8px;left:8px;border-radius:6px;padding:2px 7px;font-size:10px;font-weight:700;color:#fff;}
+.badge-sale{background:var(--danger);}
+.badge-new{background:var(--success);}
+.badge-hot{background:var(--gold);}
+.wish-btn{position:absolute;top:6px;right:6px;width:28px;height:28px;border-radius:50%;background:rgba(255,255,255,.85);display:flex;align-items:center;justify-content:center;font-size:14px;}
+.product-info{padding:10px 10px 12px;}
+.product-name{font-size:12px;font-weight:700;color:var(--text);line-height:1.3;margin-bottom:4px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
+.product-rating{display:flex;align-items:center;gap:3px;margin-bottom:6px;}
+.stars{color:var(--gold);font-size:11px;}
+.review-count{font-size:10px;color:var(--text3);}
+.product-prices{display:flex;align-items:center;gap:6px;margin-bottom:8px;}
+.price-now{font-size:14px;font-weight:800;color:var(--primary);}
+.price-was{font-size:11px;color:var(--text3);text-decoration:line-through;}
+.add-btn{width:100%;background:var(--primary);color:#fff;border-radius:8px;padding:8px;font-size:12px;font-weight:700;transition:background .15s;}
+.add-btn:active{background:var(--primary-dark);}
+
+/* ── Horizontal product card ── */
+.hcard{background:#fff;border-radius:var(--radius);display:flex;overflow:hidden;box-shadow:var(--shadow);margin-bottom:10px;}
+.hcard-img{width:90px;height:90px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:40px;background:linear-gradient(135deg,#f0f4f8,#e8edf3);}
+.hcard-info{flex:1;padding:10px 12px;display:flex;flex-direction:column;justify-content:space-between;}
+.hcard-name{font-size:13px;font-weight:700;line-height:1.3;}
+.hcard-price{font-size:14px;font-weight:800;color:var(--primary);}
+.hcard-add{background:var(--primary);color:#fff;border-radius:8px;padding:5px 14px;font-size:12px;font-weight:700;}
+
+/* ── Filter bar ── */
+.filter-bar{background:#fff;padding:10px 16px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border);}
+.filter-select{flex:1;border:1px solid var(--border);border-radius:8px;padding:7px 10px;font-size:13px;color:var(--text);background:#fff;}
+
+/* ── Cart ── */
+.cart-item{background:#fff;border-radius:var(--radius);display:flex;align-items:center;gap:12px;padding:12px;margin-bottom:10px;box-shadow:var(--shadow);}
+.cart-item-img{width:64px;height:64px;border-radius:10px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:30px;background:linear-gradient(135deg,#f0f4f8,#e8edf3);}
+.cart-item-info{flex:1;min-width:0;}
+.cart-item-name{font-size:13px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.cart-item-price{font-size:12px;color:var(--primary);font-weight:700;margin-top:2px;}
+.qty-row{display:flex;align-items:center;gap:8px;margin-top:6px;}
+.qty-btn{width:26px;height:26px;border-radius:50%;border:1.5px solid var(--border);background:#fff;font-size:16px;display:flex;align-items:center;justify-content:center;color:var(--text);line-height:1;}
+.qty-num{font-size:14px;font-weight:700;min-width:20px;text-align:center;}
+.del-btn{margin-left:auto;color:var(--danger);font-size:18px;}
+
+/* ── Summary card ── */
+.summary-card{background:#fff;border-radius:var(--radius);padding:16px;box-shadow:var(--shadow);margin-bottom:12px;}
+.summary-row{display:flex;justify-content:space-between;align-items:center;padding:6px 0;font-size:13px;color:var(--text2);}
+.summary-row.total{font-size:15px;font-weight:800;color:var(--text);border-top:1px solid var(--border);margin-top:6px;padding-top:12px;}
+.coupon-row{display:flex;gap:8px;margin-top:10px;}
+.coupon-input{flex:1;border:1px solid var(--border);border-radius:8px;padding:9px 12px;font-size:13px;}
+.coupon-btn{background:var(--primary);color:#fff;border-radius:8px;padding:9px 16px;font-size:13px;font-weight:700;}
+
+/* ── Checkout steps ── */
+.step-indicator{display:flex;align-items:center;justify-content:center;gap:0;padding:16px;}
+.step-circle{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;transition:all .2s;}
+.step-circle.done{background:var(--success);color:#fff;}
+.step-circle.active{background:var(--primary);color:#fff;}
+.step-circle.pending{background:var(--border);color:var(--text3);}
+.step-line{flex:1;height:2px;max-width:40px;background:var(--border);}
+.step-line.done{background:var(--success);}
+.step-label{font-size:10px;color:var(--text3);text-align:center;margin-top:2px;}
+
+/* ── Forms ── */
+.form-group{margin-bottom:14px;}
+.form-label{font-size:12px;font-weight:600;color:var(--text2);margin-bottom:5px;display:block;}
+.form-input{width:100%;border:1.5px solid var(--border);border-radius:10px;padding:11px 13px;font-size:14px;color:var(--text);transition:border-color .15s;}
+.form-input:focus{border-color:var(--primary);}
+.form-select{width:100%;border:1.5px solid var(--border);border-radius:10px;padding:11px 13px;font-size:14px;color:var(--text);background:#fff;}
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+
+/* ── Modals ── */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:200;display:none;align-items:flex-end;}
+.modal-overlay.show{display:flex;}
+.modal-sheet{background:#fff;border-radius:20px 20px 0 0;width:100%;max-height:92vh;overflow-y:auto;padding-bottom:24px;animation:slideUp .25s ease;}
+@keyframes slideUp{from{transform:translateY(100%)}to{transform:translateY(0)}}
+.modal-handle{width:36px;height:4px;background:var(--border);border-radius:2px;margin:12px auto 0;}
+.modal-header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;}
+.modal-title{font-size:16px;font-weight:700;}
+.modal-close{font-size:22px;color:var(--text3);width:32px;height:32px;display:flex;align-items:center;justify-content:center;}
+
+/* ── Product Detail ── */
+.pd-img{height:220px;display:flex;align-items:center;justify-content:center;font-size:96px;background:linear-gradient(135deg,#f0f4f8,#dce6f0);}
+.pd-body{padding:16px;}
+.pd-name{font-size:18px;font-weight:800;line-height:1.3;margin-bottom:6px;}
+.pd-price-row{display:flex;align-items:baseline;gap:10px;margin-bottom:10px;}
+.pd-price{font-size:22px;font-weight:800;color:var(--primary);}
+.pd-was{font-size:14px;color:var(--text3);text-decoration:line-through;}
+.pd-desc{font-size:13px;color:var(--text2);line-height:1.6;margin-bottom:14px;}
+.variant-label{font-size:12px;font-weight:700;color:var(--text2);margin-bottom:8px;}
+.variant-row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px;}
+.variant-btn{border:1.5px solid var(--border);border-radius:8px;padding:5px 12px;font-size:12px;font-weight:600;color:var(--text2);background:#fff;}
+.variant-btn.active{border-color:var(--primary);color:var(--primary);background:#eef3fa;}
+.review-card{background:var(--bg);border-radius:10px;padding:10px 12px;margin-bottom:8px;}
+.review-author{font-size:12px;font-weight:700;}
+.review-text{font-size:12px;color:var(--text2);margin-top:3px;line-height:1.5;}
+.pd-add-row{display:flex;gap:10px;padding:0 16px 16px;}
+.wish-toggle{width:46px;height:46px;border-radius:12px;border:1.5px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0;}
+.pd-add-btn{flex:1;background:var(--primary);color:#fff;border-radius:12px;padding:13px;font-size:14px;font-weight:700;}
+
+/* ── Orders ── */
+.order-card{background:#fff;border-radius:var(--radius);padding:14px;box-shadow:var(--shadow);margin-bottom:10px;}
+.order-id{font-size:12px;color:var(--text3);}
+.order-date{font-size:12px;color:var(--text3);}
+.order-status{font-size:11px;font-weight:700;padding:3px 10px;border-radius:20px;}
+.status-processing{background:#fef3c7;color:#d97706;}
+.status-shipped{background:#dbeafe;color:#1d4ed8;}
+.status-delivered{background:#d1fae5;color:#065f46;}
+.order-items-preview{font-size:12px;color:var(--text2);margin:6px 0;}
+.order-total-row{display:flex;justify-content:space-between;align-items:center;margin-top:8px;padding-top:8px;border-top:1px solid var(--border);}
+
+/* ── Profile ── */
+.profile-header{background:linear-gradient(135deg,var(--primary),var(--primary-dark));padding:32px 20px 24px;text-align:center;}
+.profile-avatar{width:72px;height:72px;border-radius:50%;background:var(--gold);display:flex;align-items:center;justify-content:center;font-size:28px;margin:0 auto 12px;border:3px solid rgba(255,255,255,.3);}
+.profile-name{font-size:18px;font-weight:700;color:#fff;}
+.profile-email{font-size:12px;color:rgba(255,255,255,.6);margin-top:3px;}
+.profile-stats{display:flex;background:#fff;margin:0 16px;border-radius:var(--radius);box-shadow:var(--shadow);margin-top:-20px;overflow:hidden;}
+.pstat{flex:1;padding:14px;text-align:center;border-right:1px solid var(--border);}
+.pstat:last-child{border-right:none;}
+.pstat-num{font-size:18px;font-weight:800;color:var(--primary);}
+.pstat-label{font-size:10px;color:var(--text3);margin-top:2px;}
+.menu-item{background:#fff;display:flex;align-items:center;gap:12px;padding:14px 16px;border-bottom:1px solid var(--border);}
+.menu-icon{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;}
+.menu-text{flex:1;font-size:14px;font-weight:600;color:var(--text);}
+.menu-arrow{color:var(--text3);font-size:18px;}
+
+/* ── Buttons ── */
+.btn-primary{width:100%;background:var(--primary);color:#fff;border-radius:12px;padding:14px;font-size:15px;font-weight:700;transition:background .15s;}
+.btn-primary:active{background:var(--primary-dark);}
+.btn-gold{width:100%;background:var(--gold);color:#fff;border-radius:12px;padding:14px;font-size:15px;font-weight:700;}
+.btn-outline{width:100%;background:#fff;color:var(--primary);border:2px solid var(--primary);border-radius:12px;padding:13px;font-size:15px;font-weight:700;}
+
+/* ── Toast ── */
+.toast{position:fixed;bottom:76px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--primary);color:#fff;padding:10px 20px;border-radius:24px;font-size:13px;font-weight:600;white-space:nowrap;opacity:0;transition:all .3s;z-index:500;pointer-events:none;}
+.toast.show{transform:translateX(-50%) translateY(0);opacity:1;}
+
+/* ── Empty state ── */
+.empty{text-align:center;padding:60px 20px;}
+.empty-icon{font-size:56px;margin-bottom:14px;}
+.empty-title{font-size:16px;font-weight:700;margin-bottom:6px;}
+.empty-sub{font-size:13px;color:var(--text3);line-height:1.5;}
+
+/* ── Deal banner ── */
+.deal-banner{margin:0 16px 16px;border-radius:var(--radius);background:linear-gradient(135deg,#7c3aed,#4c1d95);padding:14px 16px;display:flex;align-items:center;justify-content:space-between;}
+.deal-text{color:#fff;}
+.deal-tag{font-size:10px;font-weight:700;color:#c4b5fd;text-transform:uppercase;letter-spacing:.5px;}
+.deal-title{font-size:15px;font-weight:800;color:#fff;margin-top:2px;}
+.deal-sub{font-size:11px;color:rgba(255,255,255,.6);margin-top:2px;}
+.deal-emoji{font-size:40px;}
+
+/* ── Success screen ── */
+.success-screen{text-align:center;padding:40px 24px;}
+.success-icon{font-size:72px;margin-bottom:16px;}
+.success-title{font-size:22px;font-weight:800;color:var(--text);margin-bottom:8px;}
+.success-sub{font-size:14px;color:var(--text2);line-height:1.6;margin-bottom:24px;}
+.order-ref{background:var(--bg);border-radius:12px;padding:14px;display:inline-block;font-size:18px;font-weight:800;color:var(--primary);letter-spacing:1px;}
+
+/* ── Payment options ── */
+.pay-option{background:#fff;border:2px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px;display:flex;align-items:center;gap:12px;transition:border-color .15s;}
+.pay-option.active{border-color:var(--primary);}
+.pay-icon{font-size:24px;width:40px;text-align:center;}
+.pay-name{font-size:14px;font-weight:700;}
+.pay-sub{font-size:11px;color:var(--text3);}
+.pay-check{margin-left:auto;width:20px;height:20px;border-radius:50%;border:2px solid var(--border);display:flex;align-items:center;justify-content:center;}
+.pay-option.active .pay-check{background:var(--primary);border-color:var(--primary);}
+
+/* ── Wishlist mark ── */
+.wishlisted{color:#ef4444 !important;}
+</style>
+</head>
+<body>
+<div id="app">
+
+<!-- ═══════════════ TOP HEADER ═══════════════ -->
+<div class="top-header">
+  <div class="logo">
+    <div class="logo-box">🏦</div>
+    <div>
+      <div class="logo-name">ZB Shop</div>
+      <div class="logo-sub">Zemen Bank</div>
+    </div>
+  </div>
+  <button class="header-btn" onclick="goPage('shop');focusSearch()">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+  </button>
+  <button class="header-btn" onclick="goPage('cart')" style="position:relative">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>
+    <span class="bnav-badge" id="header-cart-badge" style="display:none"></span>
+  </button>
+</div>
+
+<!-- ═══════════════ HOME PAGE ═══════════════ -->
+<div class="page active" id="page-home">
+
+  <!-- Hero -->
+  <div class="hero" onclick="goPage('shop')">
+    <div class="hero-tag">🔥 Member Exclusive</div>
+    <div class="hero-title">Shop Smarter,<br/>Save More</div>
+    <div class="hero-sub">Free delivery on orders<br/>over ETB 1,000</div>
+    <div class="hero-btn">Shop Now →</div>
+    <div class="hero-emoji">🛍️</div>
+  </div>
+
+  <!-- Categories -->
+  <div class="section">
+    <div class="section-header">
+      <span class="section-title">Categories</span>
+    </div>
+  </div>
+  <div class="cat-scroll" id="home-cats"></div>
+
+  <!-- Deal banner -->
+  <div style="height:12px"></div>
+  <div class="deal-banner">
+    <div class="deal-text">
+      <div class="deal-tag">Limited Offer</div>
+      <div class="deal-title">Up to 30% Off</div>
+      <div class="deal-sub">Use code: ZEMEN10</div>
+    </div>
+    <div class="deal-emoji">💸</div>
+  </div>
+
+  <!-- Featured -->
+  <div class="section">
+    <div class="section-header">
+      <span class="section-title">Featured Products</span>
+      <span class="see-all" onclick="goPage('shop')">See all</span>
+    </div>
+    <div class="product-grid" id="home-featured"></div>
+  </div>
+
+  <!-- Top Deals (horizontal) -->
+  <div class="section" style="margin-top:16px;">
+    <div class="section-header">
+      <span class="section-title">Top Deals</span>
+      <span class="see-all" onclick="goPage('shop')">See all</span>
+    </div>
+    <div id="home-deals"></div>
+  </div>
+
+  <div style="height:16px"></div>
+</div>
+
+<!-- ═══════════════ SHOP PAGE ═══════════════ -->
+<div class="page" id="page-shop">
+  <div class="search-bar">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#999" stroke-width="2.2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+    <input id="search-input" type="text" placeholder="Search products..." oninput="renderShop()"/>
+    <button id="search-clear" onclick="clearSearch()" style="color:var(--text3);font-size:18px;display:none">✕</button>
+  </div>
+
+  <div class="cat-scroll" id="shop-cats" style="margin-bottom:4px;"></div>
+
+  <div class="filter-bar">
+    <select class="filter-select" id="sort-select" onchange="renderShop()">
+      <option value="">Sort: Default</option>
+      <option value="price-asc">Price: Low → High</option>
+      <option value="price-desc">Price: High → Low</option>
+      <option value="rating">Top Rated</option>
+      <option value="name">Name A→Z</option>
+    </select>
+    <button onclick="toggleOnSale()" id="sale-btn" style="background:var(--bg);border:1.5px solid var(--border);border-radius:8px;padding:7px 12px;font-size:12px;font-weight:600;color:var(--text2);white-space:nowrap;">On Sale</button>
+  </div>
+
+  <div style="padding:12px 16px 0">
+    <div class="product-grid" id="shop-grid"></div>
+    <div id="shop-empty" class="empty" style="display:none">
+      <div class="empty-icon">🔍</div>
+      <div class="empty-title">No products found</div>
+      <div class="empty-sub">Try a different search or filter</div>
+    </div>
+  </div>
+  <div style="height:16px"></div>
+</div>
+
+<!-- ═══════════════ CART PAGE ═══════════════ -->
+<div class="page" id="page-cart">
+  <div style="padding:16px 16px 0;display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+    <span style="font-size:17px;font-weight:800">My Cart</span>
+    <button onclick="clearCart()" style="font-size:12px;color:var(--danger);font-weight:600">Clear All</button>
+  </div>
+  <div id="cart-empty" class="empty" style="display:none;padding-bottom:20px;">
+    <div class="empty-icon">🛒</div>
+    <div class="empty-title">Your cart is empty</div>
+    <div class="empty-sub">Add some products to get started</div>
+    <button class="btn-primary" style="margin-top:20px;max-width:200px;margin-left:auto;margin-right:auto" onclick="goPage('shop')">Browse Shop</button>
+  </div>
+  <div id="cart-content" style="padding:0 16px;">
+    <div id="cart-items-list"></div>
+    <div class="summary-card" id="cart-summary">
+      <div class="summary-row"><span>Subtotal</span><span id="sum-sub">ETB 0</span></div>
+      <div class="summary-row"><span>Delivery</span><span id="sum-del">ETB 50</span></div>
+      <div class="summary-row" id="sum-discount-row" style="color:var(--success);display:none"><span>Discount</span><span id="sum-disc">-ETB 0</span></div>
+      <div class="summary-row total"><span>Total</span><span id="sum-total">ETB 0</span></div>
+      <div class="coupon-row">
+        <input class="coupon-input" id="coupon-input" placeholder="Coupon code (ZEMEN10)" style="text-transform:uppercase"/>
+        <button class="coupon-btn" onclick="applyCoupon()">Apply</button>
+      </div>
+    </div>
+    <button class="btn-gold" onclick="openCheckout()" id="checkout-btn" style="margin-bottom:16px">Proceed to Checkout →</button>
+  </div>
+</div>
+
+<!-- ═══════════════ ORDERS PAGE ═══════════════ -->
+<div class="page" id="page-orders">
+  <div style="padding:16px 16px 0;font-size:17px;font-weight:800;margin-bottom:12px;">My Orders</div>
+  <div id="orders-empty" class="empty" style="display:none">
+    <div class="empty-icon">📦</div>
+    <div class="empty-title">No orders yet</div>
+    <div class="empty-sub">Your completed orders will appear here</div>
+    <button class="btn-primary" style="margin-top:20px;max-width:200px;margin-left:auto;margin-right:auto" onclick="goPage('shop')">Start Shopping</button>
+  </div>
+  <div id="orders-list" style="padding:0 16px;"></div>
+</div>
+
+<!-- ═══════════════ PROFILE PAGE ═══════════════ -->
+<div class="page" id="page-profile">
+  <div class="profile-header">
+    <div class="profile-avatar">👤</div>
+    <div class="profile-name" id="profile-name">Shareholder</div>
+    <div class="profile-email" id="profile-email">member@zemenbank.com</div>
+  </div>
+  <div style="height:24px;background:linear-gradient(to bottom,var(--primary-dark) 60%,var(--bg) 100%);"></div>
+  <div class="profile-stats" id="profile-stats">
+    <div class="pstat"><div class="pstat-num" id="ps-orders">0</div><div class="pstat-label">Orders</div></div>
+    <div class="pstat"><div class="pstat-num" id="ps-wishlist">0</div><div class="pstat-label">Wishlist</div></div>
+    <div class="pstat"><div class="pstat-num" id="ps-spent">0</div><div class="pstat-label">ETB Spent</div></div>
+  </div>
+  <div style="height:16px;background:var(--bg)"></div>
+  <div onclick="goPage('orders')" class="menu-item">
+    <div class="menu-icon" style="background:#dbeafe">📦</div>
+    <div class="menu-text">My Orders</div>
+    <div class="menu-arrow">›</div>
+  </div>
+  <div onclick="openWishlist()" class="menu-item">
+    <div class="menu-icon" style="background:#fce7f3">❤️</div>
+    <div class="menu-text">Wishlist</div>
+    <div class="menu-arrow">›</div>
+  </div>
+  <div onclick="openAddresses()" class="menu-item">
+    <div class="menu-icon" style="background:#d1fae5">📍</div>
+    <div class="menu-text">Delivery Addresses</div>
+    <div class="menu-arrow">›</div>
+  </div>
+  <div onclick="openNotifSettings()" class="menu-item">
+    <div class="menu-icon" style="background:#fef3c7">🔔</div>
+    <div class="menu-text">Notifications</div>
+    <div class="menu-arrow">›</div>
+  </div>
+  <div onclick="openHelp()" class="menu-item">
+    <div class="menu-icon" style="background:#ede9fe">💬</div>
+    <div class="menu-text">Help & Support</div>
+    <div class="menu-arrow">›</div>
+  </div>
+  <div style="height:16px"></div>
+</div>
+
+<!-- ═══════════════ BOTTOM NAV ═══════════════ -->
+<nav class="bnav">
+  <button class="bnav-item active" id="nav-home" onclick="goPage('home')">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+    Home
+  </button>
+  <button class="bnav-item" id="nav-shop" onclick="goPage('shop')">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg>
+    Shop
+  </button>
+  <button class="bnav-item" id="nav-cart" onclick="goPage('cart')" style="position:relative">
+    <div style="position:relative;display:inline-block">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>
+      <span class="bnav-badge" id="cart-badge" style="display:none"></span>
+    </div>
+    Cart
+  </button>
+  <button class="bnav-item" id="nav-orders" onclick="goPage('orders')">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+    Orders
+  </button>
+  <button class="bnav-item" id="nav-profile" onclick="goPage('profile')">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+    Profile
+  </button>
+</nav>
+
+<!-- ═══════════════ PRODUCT DETAIL MODAL ═══════════════ -->
+<div class="modal-overlay" id="pd-modal" onclick="closePd(event)">
+  <div class="modal-sheet" id="pd-sheet">
+    <div class="modal-handle"></div>
+    <div style="display:flex;align-items:center;justify-content:flex-end;padding:4px 12px 0">
+      <button class="modal-close" onclick="closePdModal()">✕</button>
+    </div>
+    <div class="pd-img" id="pd-img"></div>
+    <div class="pd-body">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px">
+        <div class="pd-name" id="pd-name"></div>
+        <span id="pd-badge" style="flex-shrink:0;"></span>
+      </div>
+      <div class="product-rating" style="margin:6px 0 8px">
+        <span class="stars" id="pd-stars"></span>
+        <span style="font-size:12px;font-weight:700;color:var(--text);" id="pd-rating-val"></span>
+        <span class="review-count" id="pd-reviews"></span>
+      </div>
+      <div class="pd-price-row">
+        <span class="pd-price" id="pd-price"></span>
+        <span class="pd-was" id="pd-was"></span>
+      </div>
+      <p class="pd-desc" id="pd-desc"></p>
+
+      <div id="pd-variants-section">
+        <div class="variant-label" id="pd-variant-label"></div>
+        <div class="variant-row" id="pd-variants"></div>
+      </div>
+
+      <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:8px">Customer Reviews</div>
+      <div id="pd-reviews-list"></div>
+    </div>
+    <div class="pd-add-row">
+      <button class="wish-toggle" id="pd-wish-btn" onclick="toggleWishPd()">🤍</button>
+      <button class="pd-add-btn" onclick="addToCartFromPd()">Add to Cart</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ CHECKOUT MODAL ═══════════════ -->
+<div class="modal-overlay" id="co-modal">
+  <div class="modal-sheet">
+    <div class="modal-handle"></div>
+    <div class="modal-header">
+      <span class="modal-title">Checkout</span>
+      <button class="modal-close" onclick="closeCoModal()">✕</button>
+    </div>
+
+    <!-- Step indicator -->
+    <div style="display:flex;align-items:center;justify-content:center;gap:4px;padding:0 24px 16px">
+      <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+        <div class="step-circle active" id="si-1">1</div>
+        <div class="step-label">Shipping</div>
+      </div>
+      <div class="step-line" id="sl-1"></div>
+      <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+        <div class="step-circle pending" id="si-2">2</div>
+        <div class="step-label">Payment</div>
+      </div>
+      <div class="step-line" id="sl-2"></div>
+      <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+        <div class="step-circle pending" id="si-3">3</div>
+        <div class="step-label">Confirm</div>
+      </div>
+    </div>
+
+    <!-- Step 1: Shipping -->
+    <div id="co-step-1" style="padding:0 16px 16px">
+      <div class="form-group">
+        <label class="form-label">Full Name *</label>
+        <input class="form-input" id="co-name" placeholder="e.g. Abebe Kebede"/>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Phone Number *</label>
+        <input class="form-input" id="co-phone" placeholder="09xxxxxxxx" type="tel"/>
+      </div>
+      <div class="form-group">
+        <label class="form-label">City *</label>
+        <select class="form-select" id="co-city">
+          <option value="">Select city</option>
+          <option>Addis Ababa</option><option>Dire Dawa</option><option>Mekelle</option>
+          <option>Gondar</option><option>Hawassa</option><option>Bahir Dar</option>
+          <option>Adama</option><option>Jimma</option><option>Dessie</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Delivery Address *</label>
+        <textarea class="form-input" id="co-address" rows="2" placeholder="Sub-city, Woreda, Street..."></textarea>
+      </div>
+      <button class="btn-primary" onclick="coNext(1)">Continue to Payment →</button>
+    </div>
+
+    <!-- Step 2: Payment -->
+    <div id="co-step-2" style="padding:0 16px 16px;display:none">
+      <div style="margin-bottom:14px;font-size:13px;font-weight:700;color:var(--text2)">Select Payment Method</div>
+      <div class="pay-option active" id="pay-zemen" onclick="selectPay('zemen')">
+        <div class="pay-icon">🏦</div>
+        <div><div class="pay-name">Zemen Bank</div><div class="pay-sub">Pay from your account</div></div>
+        <div class="pay-check">✓</div>
+      </div>
+      <div class="pay-option" id="pay-telebirr" onclick="selectPay('telebirr')">
+        <div class="pay-icon">📱</div>
+        <div><div class="pay-name">Telebirr</div><div class="pay-sub">Mobile money payment</div></div>
+        <div class="pay-check"></div>
+      </div>
+      <div class="pay-option" id="pay-cbe" onclick="selectPay('cbe')">
+        <div class="pay-icon">💳</div>
+        <div><div class="pay-name">CBE Birr</div><div class="pay-sub">Commercial Bank payment</div></div>
+        <div class="pay-check"></div>
+      </div>
+      <div class="pay-option" id="pay-cod" onclick="selectPay('cod')">
+        <div class="pay-icon">💵</div>
+        <div><div class="pay-name">Cash on Delivery</div><div class="pay-sub">Pay when you receive</div></div>
+        <div class="pay-check"></div>
+      </div>
+      <div style="height:12px"></div>
+      <button class="btn-primary" onclick="coNext(2)">Review Order →</button>
+    </div>
+
+    <!-- Step 3: Confirm -->
+    <div id="co-step-3" style="padding:0 16px 16px;display:none">
+      <div style="font-size:13px;font-weight:700;color:var(--text2);margin-bottom:10px">Order Summary</div>
+      <div id="co-order-items" style="margin-bottom:14px;"></div>
+      <div class="summary-card" style="margin-bottom:14px">
+        <div class="summary-row"><span>Subtotal</span><span id="co-sub"></span></div>
+        <div class="summary-row"><span>Delivery</span><span id="co-del"></span></div>
+        <div class="summary-row" id="co-disc-row" style="color:var(--success);display:none"><span>Discount</span><span id="co-disc"></span></div>
+        <div class="summary-row total"><span>Total</span><span id="co-total"></span></div>
+      </div>
+      <div id="co-ship-review" style="background:var(--bg);border-radius:10px;padding:12px;margin-bottom:14px;font-size:13px;color:var(--text2);line-height:1.7;"></div>
+      <button class="btn-gold" onclick="placeOrder()">✓ Place Order</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ WISHLIST MODAL ═══════════════ -->
+<div class="modal-overlay" id="wl-modal" onclick="closeWlModal(event)">
+  <div class="modal-sheet" onclick="event.stopPropagation()">
+    <div class="modal-handle"></div>
+    <div class="modal-header">
+      <span class="modal-title">❤️ Wishlist</span>
+      <button class="modal-close" onclick="document.getElementById('wl-modal').classList.remove('show')">✕</button>
+    </div>
+    <div style="padding:0 16px 16px" id="wl-list"></div>
+  </div>
+</div>
+
+<!-- ═══════════════ ORDER SUCCESS MODAL ═══════════════ -->
+<div class="modal-overlay" id="success-modal">
+  <div class="modal-sheet">
+    <div class="success-screen">
+      <div class="success-icon">🎉</div>
+      <div class="success-title">Order Placed!</div>
+      <div class="success-sub">Thank you! Your order has been confirmed.<br/>You'll receive a notification soon.</div>
+      <div class="order-ref" id="success-ref">#ZB-000000</div>
+      <div style="margin-top:8px;font-size:12px;color:var(--text3)">Estimated: 2–4 business days</div>
+      <div style="display:flex;gap:10px;margin-top:24px;">
+        <button class="btn-outline" style="flex:1" onclick="goPage('orders');closeSuccess()">View Orders</button>
+        <button class="btn-primary" style="flex:1" onclick="goPage('home');closeSuccess()">Continue</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ TOAST ═══════════════ -->
+<div class="toast" id="toast"></div>
+
+</div><!-- #app -->
+
+<script>
+// ══════════════════════════════════════════
+// DATA
+// ══════════════════════════════════════════
+const CATEGORIES = [
+  {id:'all',    label:'All',          emoji:'🏪'},
+  {id:'electronics', label:'Electronics', emoji:'📱'},
+  {id:'fashion',     label:'Fashion',     emoji:'👔'},
+  {id:'home',        label:'Home',        emoji:'🏠'},
+  {id:'books',       label:'Books',       emoji:'📚'},
+  {id:'health',      label:'Health',      emoji:'💪'},
+];
+
+const PRODUCTS = [
+  // Electronics
+  {id:1,  cat:'electronics', name:'Wireless Earbuds Pro',         price:1200, was:1600, emoji:'🎧', rating:4.8, reviews:214, badge:'hot',  desc:'Premium sound quality with active noise cancellation, 30hr battery, IPX5 water-resistant. Perfect for workouts and daily commute.', variants:{label:'Color',opts:['Midnight Black','Pearl White','Navy Blue']}, sampleReviews:[{a:'Bereket T.',s:5,t:'Amazing sound quality! Very comfortable for long use.'},{a:'Sara M.',s:4,t:'Great earbuds, fast charging is a bonus.'}]},
+  {id:2,  cat:'electronics', name:'Smart Watch Series 5',         price:3500, was:4200, emoji:'⌚', rating:4.6, reviews:89,  badge:'new',  desc:'Health & fitness tracker with heart rate monitor, sleep tracking, SpO2, and 7-day battery life. Compatible with Android & iOS.', variants:{label:'Size',opts:['41mm','45mm']}, sampleReviews:[{a:'Dawit A.',s:5,t:'Excellent watch! The health tracking is very accurate.'},{a:'Hana G.',s:4,t:'Love the design and battery life.'}]},
+  {id:3,  cat:'electronics', name:'Bluetooth Speaker 360°',       price:1800, was:2200, emoji:'🔊', rating:4.9, reviews:178, badge:'hot',  desc:'360-degree surround sound, 20W output, IPX7 waterproof, 18-hour playtime. Portable and powerful for any occasion.', variants:{label:'Color',opts:['Black','Blue','Red']}, sampleReviews:[{a:'Yonas K.',s:5,t:'Best speaker for the price! Very loud and clear.'},{a:'Tigist B.',s:5,t:'Perfect for outdoor use.'}]},
+  {id:4,  cat:'electronics', name:'USB-C Fast Charger 65W',       price:450,  was:null, emoji:'🔌', rating:4.7, reviews:312, badge:null,   desc:'Universal 65W GaN fast charger with 3 ports (2×USB-C, 1×USB-A). Charges laptop, phone, and tablet simultaneously.', variants:{label:'Cable',opts:['No Cable','With 1m Cable','With 2m Cable']}, sampleReviews:[{a:'Abel T.',s:5,t:'Charges my laptop super fast!'},{a:'Mekdes L.',s:4,t:'Compact and powerful.'}]},
+  {id:5,  cat:'electronics', name:'Power Bank 20000mAh',          price:980,  was:1200, emoji:'🔋', rating:4.5, reviews:156, badge:'sale', desc:'Slim 20000mAh power bank with 22.5W fast charging, dual USB-A + USB-C output, LCD display showing remaining capacity.', variants:{label:'Color',opts:['Black','White']}, sampleReviews:[{a:'Fiker S.',s:5,t:'Charged my phone 5 times. Great capacity!'},{a:'Robel H.',s:4,t:'Good quality, fast charging works great.'}]},
+  {id:6,  cat:'electronics', name:'Noise Cancelling Headphones',  price:4200, was:5500, emoji:'🎵', rating:4.7, reviews:92,  badge:'sale', desc:'Professional-grade ANC headphones with 40hr battery, Hi-Res Audio, foldable design, and premium memory foam ear cushions.', variants:{label:'Color',opts:['Matte Black','Silver']}, sampleReviews:[{a:'Naomi A.',s:5,t:'The noise cancellation is incredible. Worth every birr.'},{a:'Eyob T.',s:4,t:'Very comfortable for hours of listening.'}]},
+
+  // Fashion
+  {id:7,  cat:'fashion', name:'ZB Premium Polo Shirt',        price:890,  was:null, emoji:'👔', rating:4.6, reviews:56,  badge:'new',  desc:'Official Zemen Bank branded polo shirt in premium cotton piqué fabric. Embroidered logo. Machine washable.', variants:{label:'Size',opts:['S','M','L','XL','XXL']}, sampleReviews:[{a:'Michael D.',s:5,t:'Great quality fabric, fits perfectly.'},{a:'Liya A.',s:4,t:'Love the design. Very professional look.'}]},
+  {id:8,  cat:'fashion', name:'Leather Tote Bag',             price:1250, was:1800, emoji:'👜', rating:4.4, reviews:45,  badge:'sale', desc:'Genuine leather tote bag, spacious main compartment with laptop sleeve, magnetic closure, adjustable strap. Available in 3 colors.', variants:{label:'Color',opts:['Black','Brown','Tan']}, sampleReviews:[{a:'Meron T.',s:5,t:'Beautiful bag! Very spacious and well made.'},{a:'Selamawit K.',s:4,t:'Great quality leather.'}]},
+  {id:9,  cat:'fashion', name:'RFID Business Wallet',         price:580,  was:null, emoji:'👛', rating:4.8, reviews:134, badge:null,   desc:'Slim bifold wallet with RFID blocking technology, 8 card slots, full-length bill compartment. Genuine leather.', variants:{label:'Color',opts:['Dark Brown','Black','Navy']}, sampleReviews:[{a:'Biniam F.',s:5,t:'Very slim and holds all my cards.'},{a:'Kidus M.',s:5,t:'RFID blocking works great. Very sleek.'}]},
+  {id:10, cat:'fashion', name:'Silk Necktie Set',             price:420,  was:550,  emoji:'🎗️', rating:4.3, reviews:38,  badge:'sale', desc:'Premium silk necktie with matching pocket square. Classic patterns ideal for business and formal occasions.', variants:{label:'Color',opts:['Navy/Gold','Black/Silver','Burgundy']}, sampleReviews:[{a:'Tsegay A.',s:4,t:'Very elegant, great for business meetings.'},{a:'Henok S.',s:4,t:'Nice quality silk, looks very professional.'}]},
+  {id:11, cat:'fashion', name:'Classic Leather Watch',        price:2800, was:3600, emoji:'🕰️', rating:4.6, reviews:71,  badge:'sale', desc:'Elegant timepiece with stainless steel case, sapphire crystal glass, genuine leather strap, 50m water resistance, 2-year warranty.', variants:{label:'Strap',opts:['Brown Leather','Black Leather','Metal Band']}, sampleReviews:[{a:'Girma B.',s:5,t:'Beautiful watch. Looks very premium.'},{a:'Eden T.',s:4,t:'Great gift item. Very stylish.'}]},
+
+  // Home & Office
+  {id:12, cat:'home', name:'Adjustable Laptop Stand',     price:780,  was:null, emoji:'💻', rating:4.5, reviews:67,  badge:null,  desc:'Ergonomic aluminum laptop stand with 7 adjustable angles, compatible with 10–17" laptops, foldable & portable. Reduces neck strain.', variants:{label:'Color',opts:['Silver','Space Gray']}, sampleReviews:[{a:'Alemayehu T.',s:5,t:'My neck pain is gone! Great ergonomic design.'},{a:'Hiwot K.',s:4,t:'Sturdy and adjustable. Good quality.'}]},
+  {id:13, cat:'home', name:'Bamboo Desk Organizer Set',   price:520,  was:680,  emoji:'🗂️', rating:4.3, reviews:38,  badge:'sale', desc:'5-piece eco-friendly bamboo desk organizer: pen holder, file tray, sticky note holder, phone stand, and cable organizer.', variants:{label:'Size',opts:['Standard','Large']}, sampleReviews:[{a:'Tigist W.',s:4,t:'Looks great on my desk. Very organized now.'},{a:'Petros A.',s:4,t:'Good quality bamboo. Nice natural look.'}]},
+  {id:14, cat:'home', name:'Espresso Coffee Maker',       price:2100, was:2800, emoji:'☕', rating:4.7, reviews:89,  badge:'hot',  desc:'Compact 15-bar espresso machine with milk frother, 1.5L removable water tank, programmable auto-off. Makes café-quality coffee at home.', variants:{label:'Color',opts:['Black','Silver','Red']}, sampleReviews:[{a:'Selam G.',s:5,t:'Makes amazing coffee! Best purchase ever.'},{a:'Bezawit H.',s:5,t:'The espresso quality is incredible.'}]},
+  {id:15, cat:'home', name:'LED Smart Desk Lamp',         price:690,  was:890,  emoji:'💡', rating:4.4, reviews:52,  badge:'sale', desc:'Eye-care LED lamp with 5 color temperatures, 10 brightness levels, USB charging port, touch control, and memory function.', variants:{label:'Color',opts:['White','Black']}, sampleReviews:[{a:'Yordanos M.',s:4,t:'Perfect for night work. Eyes feel less strained.'},{a:'Samuel B.',s:4,t:'The USB charging port is very useful.'}]},
+  {id:16, cat:'home', name:'Premium Ergonomic Chair',     price:5800, was:7200, emoji:'🪑', rating:4.8, reviews:43,  badge:'sale', desc:'High-back mesh office chair with lumbar support, 4D armrests, headrest, tilt mechanism, adjustable height. 5-year warranty.', variants:{label:'Color',opts:['Black','Gray','Blue']}, sampleReviews:[{a:'Dawit M.',s:5,t:'Best investment for working from home.'},{a:'Tigist A.',s:5,t:'Extremely comfortable for long hours.'}]},
+
+  // Books
+  {id:17, cat:'books', name:'Financial Planning Guide',   price:220,  was:null, emoji:'📊', rating:4.6, reviews:87,  badge:null,   desc:'Comprehensive guide to personal finance, investment strategies, retirement planning, and building wealth in Ethiopia. 320 pages.', variants:{label:'Format',opts:['Paperback','Hardcover']}, sampleReviews:[{a:'Abreham K.',s:5,t:'Very practical advice. Changed how I manage money.'},{a:'Senait F.',s:4,t:'Excellent resource for Ethiopian investors.'}]},
+  {id:18, cat:'books', name:'Investment Masterclass',     price:280,  was:null, emoji:'📈', rating:4.8, reviews:63,  badge:'new',  desc:'Learn stock market investing, bonds, mutual funds, real estate, and crypto from basics to advanced strategies. Includes case studies.', variants:{label:'Format',opts:['Paperback','Hardcover','eBook']}, sampleReviews:[{a:'Mikael T.',s:5,t:'Best investment book I have read. Very clear.'},{a:'Hana B.',s:5,t:'Changed my whole perspective on investing.'}]},
+  {id:19, cat:'books', name:'Leadership & Business',      price:195,  was:250,  emoji:'📖', rating:4.4, reviews:45,  badge:'sale', desc:'Essential leadership principles for modern African business leaders. Covers strategy, team management, and organizational culture.', variants:{label:'Format',opts:['Paperback','Hardcover']}, sampleReviews:[{a:'Biruk A.',s:4,t:'Great insights for business leaders.'},{a:'Rahel M.',s:4,t:'Very relevant to the Ethiopian business context.'}]},
+  {id:20, cat:'books', name:'Ethiopian Economic History', price:160,  was:null, emoji:'🏛️', rating:4.5, reviews:29,  badge:null,   desc:'A comprehensive overview of Ethiopia\'s economic development, from ancient trade routes to modern financial systems. Academic yet accessible.', variants:{label:'Format',opts:['Paperback']}, sampleReviews:[{a:'Yesuf A.',s:5,t:'Fascinating read. Very well researched.'},{a:'Bethel K.',s:4,t:'Excellent historical perspective.'}]},
+
+  // Health
+  {id:21, cat:'health', name:'Fitness Tracker Band',      price:1400, was:1800, emoji:'🏃', rating:4.5, reviews:128, badge:'sale', desc:'Advanced fitness band with heart rate, SpO2, sleep score, stress monitor, 50+ workout modes, GPS, 14-day battery. IP68 waterproof.', variants:{label:'Size',opts:['Small/Medium','Large/XL']}, sampleReviews:[{a:'Ermias D.',s:5,t:'Great tracker! Sleep monitoring is very accurate.'},{a:'Tsehai G.',s:4,t:'Excellent features for the price.'}]},
+  {id:22, cat:'health', name:'Insulated Water Bottle',    price:380,  was:null, emoji:'💧', rating:4.6, reviews:198, badge:null,   desc:'Triple-insulated stainless steel bottle keeps drinks cold 24h, hot 12h. BPA-free, leak-proof lid, 750ml capacity.', variants:{label:'Color',opts:['Blue','Black','Green','Pink']}, sampleReviews:[{a:'Azeb M.',s:5,t:'Keeps my water cold all day!'},{a:'Tesfaye K.',s:5,t:'Best water bottle I have owned.'}]},
+  {id:23, cat:'health', name:'Premium Yoga Mat',          price:560,  was:720,  emoji:'🧘', rating:4.4, reviews:76,  badge:'sale', desc:'Extra-thick 6mm non-slip yoga mat with carrying strap, alignment lines, eco-friendly TPE material, suitable for all yoga types.', variants:{label:'Color',opts:['Purple','Blue','Green','Black']}, sampleReviews:[{a:'Lensa T.',s:5,t:'Perfect thickness, very comfortable.'},{a:'Marta H.',s:4,t:'Great grip, does not slip during practice.'}]},
+  {id:24, cat:'health', name:'Vitamin C + Zinc 90 Tabs',  price:340,  was:420,  emoji:'💊', rating:4.7, reviews:215, badge:'sale', desc:'High-dose Vitamin C (1000mg) + Zinc (15mg) immune support supplement. 90 tablets, 3-month supply, GMP certified.', variants:{label:'Pack',opts:['1 Pack (90 tabs)','2 Pack (180 tabs)','3 Pack (270 tabs)']}, sampleReviews:[{a:'Serawit A.',s:5,t:'Great quality vitamins. Noticed improvement.'},{a:'Belay T.',s:4,t:'Good product, fast delivery.'}]},
+];
+
+const fmt = n => 'ETB ' + n.toLocaleString();
+const stars = r => '★'.repeat(Math.round(r)) + '☆'.repeat(5-Math.round(r));
+
+// ══════════════════════════════════════════
+// STATE (persisted)
+// ══════════════════════════════════════════
+let cart     = JSON.parse(localStorage.getItem('zb_cart')    || '[]');
+let wishlist = JSON.parse(localStorage.getItem('zb_wish')    || '[]');
+let orders   = JSON.parse(localStorage.getItem('zb_orders')  || '[]');
+let coupon   = localStorage.getItem('zb_coupon') || '';
+let activeCat = 'all';
+let shopCat   = 'all';
+let onSaleOnly = false;
+let currentPdId = null;
+let selectedVariant = null;
+let selectedPay = 'zemen';
+
+function save() {
+  localStorage.setItem('zb_cart',   JSON.stringify(cart));
+  localStorage.setItem('zb_wish',   JSON.stringify(wishlist));
+  localStorage.setItem('zb_orders', JSON.stringify(orders));
+  localStorage.setItem('zb_coupon', coupon);
+}
+
+// ══════════════════════════════════════════
+// NAVIGATION
+// ══════════════════════════════════════════
+function goPage(name) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.bnav-item').forEach(b => b.classList.remove('active'));
+  document.getElementById('page-' + name).classList.add('active');
+  document.getElementById('nav-' + name).classList.add('active');
+  if (name === 'cart')    renderCart();
+  if (name === 'orders')  renderOrders();
+  if (name === 'profile') renderProfile();
+  if (name === 'shop')    renderShop();
+  window.scrollTo(0, 0);
+}
+
+// ══════════════════════════════════════════
+// HOME
+// ══════════════════════════════════════════
+function renderHome() {
+  // Category chips
+  const hc = document.getElementById('home-cats');
+  hc.innerHTML = CATEGORIES.map(c =>
+    `<button class="cat-chip ${c.id===activeCat?'active':''}" onclick="setHomeCat('${c.id}')">${c.emoji} ${c.label}</button>`
+  ).join('');
+
+  // Featured (top 6 by rating, or filtered)
+  const pool = activeCat === 'all' ? PRODUCTS : PRODUCTS.filter(p => p.cat === activeCat);
+  const featured = [...pool].sort((a,b) => b.rating - a.rating).slice(0, 6);
+  document.getElementById('home-featured').innerHTML = featured.map(productCard).join('');
+
+  // Top deals (with discount, horizontal cards)
+  const deals = PRODUCTS.filter(p => p.was).slice(0, 4);
+  document.getElementById('home-deals').innerHTML = deals.map(hCard).join('');
+}
+
+function setHomeCat(id) {
+  activeCat = id;
+  renderHome();
+}
+
+function productCard(p) {
+  const inWish = wishlist.includes(p.id);
+  const badgeHtml = p.badge ? `<span class="badge-tag badge-${p.badge}">${p.badge.toUpperCase()}</span>` : '';
+  const wasHtml = p.was ? `<span class="price-was">${fmt(p.was)}</span>` : '';
+  return `
+  <div class="product-card" onclick="openProduct(${p.id})">
+    <div class="product-img">
+      ${p.emoji}
+      ${badgeHtml}
+      <button class="wish-btn ${inWish?'wishlisted':''}" onclick="event.stopPropagation();toggleWish(${p.id})" id="wb-${p.id}">${inWish?'❤️':'🤍'}</button>
+    </div>
+    <div class="product-info">
+      <div class="product-name">${p.name}</div>
+      <div class="product-rating">
+        <span class="stars">${stars(p.rating)}</span>
+        <span class="review-count">(${p.reviews})</span>
+      </div>
+      <div class="product-prices">
+        <span class="price-now">${fmt(p.price)}</span>
+        ${wasHtml}
+      </div>
+      <button class="add-btn" onclick="event.stopPropagation();addToCart(${p.id})">+ Add to Cart</button>
+    </div>
+  </div>`;
+}
+
+function hCard(p) {
+  return `
+  <div class="hcard" onclick="openProduct(${p.id})">
+    <div class="hcard-img">${p.emoji}</div>
+    <div class="hcard-info">
+      <div>
+        <div class="hcard-name">${p.name}</div>
+        <div style="font-size:11px;color:var(--text3)">${p.was ? `Was ${fmt(p.was)}` : ''}</div>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <span class="hcard-price">${fmt(p.price)}</span>
+        <button class="hcard-add" onclick="event.stopPropagation();addToCart(${p.id})">Add</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+// ══════════════════════════════════════════
+// SHOP
+// ══════════════════════════════════════════
+function renderShopCats() {
+  document.getElementById('shop-cats').innerHTML = CATEGORIES.map(c =>
+    `<button class="cat-chip ${c.id===shopCat?'active':''}" onclick="setShopCat('${c.id}')">${c.emoji} ${c.label}</button>`
+  ).join('');
+}
+
+function setShopCat(id) {
+  shopCat = id;
+  renderShopCats();
+  renderShop();
+}
+
+function renderShop() {
+  const q = (document.getElementById('search-input').value || '').toLowerCase();
+  const sort = document.getElementById('sort-select').value;
+  document.getElementById('search-clear').style.display = q ? 'block' : 'none';
+  document.getElementById('sale-btn').style.background = onSaleOnly ? 'var(--primary)' : 'var(--bg)';
+  document.getElementById('sale-btn').style.color = onSaleOnly ? '#fff' : 'var(--text2)';
+  document.getElementById('sale-btn').style.borderColor = onSaleOnly ? 'var(--primary)' : 'var(--border)';
+
+  let filtered = PRODUCTS.filter(p =>
+    (shopCat === 'all' || p.cat === shopCat) &&
+    (!onSaleOnly || p.was) &&
+    (!q || p.name.toLowerCase().includes(q) || p.cat.toLowerCase().includes(q))
+  );
+
+  if (sort === 'price-asc')  filtered.sort((a,b) => a.price - b.price);
+  if (sort === 'price-desc') filtered.sort((a,b) => b.price - a.price);
+  if (sort === 'rating')     filtered.sort((a,b) => b.rating - a.rating);
+  if (sort === 'name')       filtered.sort((a,b) => a.name.localeCompare(b.name));
+
+  const grid = document.getElementById('shop-grid');
+  const empty = document.getElementById('shop-empty');
+  if (!filtered.length) { grid.innerHTML = ''; empty.style.display = 'block'; }
+  else { empty.style.display = 'none'; grid.innerHTML = filtered.map(productCard).join(''); }
+}
+
+function clearSearch() {
+  document.getElementById('search-input').value = '';
+  renderShop();
+}
+
+function toggleOnSale() {
+  onSaleOnly = !onSaleOnly;
+  renderShop();
+}
+
+function focusSearch() {
+  setTimeout(() => document.getElementById('search-input').focus(), 150);
+}
+
+// ══════════════════════════════════════════
+// PRODUCT DETAIL
+// ══════════════════════════════════════════
+function openProduct(id) {
+  const p = PRODUCTS.find(x => x.id === id);
+  currentPdId = id;
+  selectedVariant = p.variants.opts[0];
+
+  document.getElementById('pd-img').textContent = p.emoji;
+  document.getElementById('pd-img').style.fontSize = '90px';
+  document.getElementById('pd-name').textContent = p.name;
+  document.getElementById('pd-price').textContent = fmt(p.price);
+  document.getElementById('pd-was').textContent = p.was ? `${fmt(p.was)}` : '';
+  document.getElementById('pd-desc').textContent = p.desc;
+  document.getElementById('pd-stars').textContent = stars(p.rating);
+  document.getElementById('pd-rating-val').textContent = p.rating;
+  document.getElementById('pd-reviews').textContent = `(${p.reviews} reviews)`;
+
+  const badgeEl = document.getElementById('pd-badge');
+  if (p.badge) {
+    badgeEl.innerHTML = `<span class="badge-tag badge-${p.badge}" style="font-size:11px;padding:3px 10px">${p.badge.toUpperCase()}</span>`;
+  } else { badgeEl.innerHTML = ''; }
+
+  // Variants
+  document.getElementById('pd-variant-label').textContent = p.variants.label + ':';
+  document.getElementById('pd-variants').innerHTML = p.variants.opts.map(o =>
+    `<button class="variant-btn ${o===selectedVariant?'active':''}" onclick="selectVariant('${o}',this)">${o}</button>`
+  ).join('');
+
+  // Reviews
+  document.getElementById('pd-reviews-list').innerHTML = p.sampleReviews.map(r =>
+    `<div class="review-card">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <span class="review-author">${r.a}</span>
+        <span class="stars" style="font-size:11px">${'★'.repeat(r.s)}${'☆'.repeat(5-r.s)}</span>
+      </div>
+      <div class="review-text">${r.t}</div>
+    </div>`
+  ).join('');
+
+  // Wishlist button
+  const inWish = wishlist.includes(id);
+  document.getElementById('pd-wish-btn').textContent = inWish ? '❤️' : '🤍';
+
+  document.getElementById('pd-modal').classList.add('show');
+}
+
+function selectVariant(val, btn) {
+  selectedVariant = val;
+  document.querySelectorAll('#pd-variants .variant-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+}
+
+function closePd(e) {
+  if (e.target === document.getElementById('pd-modal')) closePdModal();
+}
+
+function closePdModal() {
+  document.getElementById('pd-modal').classList.remove('show');
+}
+
+function addToCartFromPd() {
+  addToCart(currentPdId);
+  closePdModal();
+}
+
+function toggleWishPd() {
+  toggleWish(currentPdId);
+  const inWish = wishlist.includes(currentPdId);
+  document.getElementById('pd-wish-btn').textContent = inWish ? '❤️' : '🤍';
+}
+
+// ══════════════════════════════════════════
+// CART
+// ══════════════════════════════════════════
+function addToCart(id) {
+  const ex = cart.find(x => x.id === id);
+  if (ex) ex.qty++;
+  else cart.push({ id, qty: 1 });
+  save();
+  updateBadges();
+  showToast('🛒 Added to cart!');
+  // refresh wishlist heart on cards
+  const wb = document.getElementById('wb-' + id);
+  if (wb) {/* keep */}
+}
+
+function removeFromCart(id) {
+  cart = cart.filter(x => x.id !== id);
+  save();
+  updateBadges();
+  renderCart();
+}
+
+function changeQty(id, delta) {
+  const item = cart.find(x => x.id === id);
+  if (!item) return;
+  item.qty += delta;
+  if (item.qty <= 0) { removeFromCart(id); return; }
+  save();
+  renderCart();
+}
+
+function clearCart() {
+  if (!cart.length) return;
+  cart = [];
+  coupon = '';
+  save();
+  updateBadges();
+  renderCart();
+}
+
+function getCartTotals() {
+  const sub = cart.reduce((s, x) => {
+    const p = PRODUCTS.find(pp => pp.id === x.id);
+    return s + (p ? p.price * x.qty : 0);
+  }, 0);
+  const delivery = sub >= 1000 ? 0 : 50;
+  const discount = coupon === 'ZEMEN10' ? Math.round(sub * 0.1) : 0;
+  const total = sub + delivery - discount;
+  return { sub, delivery, discount, total };
+}
+
+function renderCart() {
+  const { sub, delivery, discount, total } = getCartTotals();
+  const empty = document.getElementById('cart-empty');
+  const content = document.getElementById('cart-content');
+
+  if (!cart.length) {
+    empty.style.display = 'block';
+    content.style.display = 'none';
+    return;
+  }
+  empty.style.display = 'none';
+  content.style.display = 'block';
+
+  document.getElementById('cart-items-list').innerHTML = cart.map(x => {
+    const p = PRODUCTS.find(pp => pp.id === x.id);
+    if (!p) return '';
+    return `
+    <div class="cart-item">
+      <div class="cart-item-img">${p.emoji}</div>
+      <div class="cart-item-info">
+        <div class="cart-item-name">${p.name}</div>
+        <div class="cart-item-price">${fmt(p.price)} each</div>
+        <div class="qty-row">
+          <button class="qty-btn" onclick="changeQty(${p.id},-1)">−</button>
+          <span class="qty-num">${x.qty}</span>
+          <button class="qty-btn" onclick="changeQty(${p.id},1)">+</button>
+          <span style="margin-left:8px;font-size:13px;font-weight:700;color:var(--primary)">${fmt(p.price*x.qty)}</span>
+          <button class="del-btn" onclick="removeFromCart(${p.id})">🗑</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+
+  document.getElementById('sum-sub').textContent = fmt(sub);
+  document.getElementById('sum-del').textContent = sub >= 1000 ? '🎉 Free' : fmt(delivery);
+  document.getElementById('sum-total').textContent = fmt(total);
+  const drow = document.getElementById('sum-discount-row');
+  if (discount > 0) {
+    drow.style.display = 'flex';
+    document.getElementById('sum-disc').textContent = '-' + fmt(discount);
+  } else { drow.style.display = 'none'; }
+
+  document.getElementById('coupon-input').value = coupon;
+}
+
+function applyCoupon() {
+  const v = document.getElementById('coupon-input').value.trim().toUpperCase();
+  if (v === 'ZEMEN10') {
+    coupon = 'ZEMEN10';
+    save();
+    renderCart();
+    showToast('🎉 10% discount applied!');
+  } else if (v === '') {
+    coupon = '';
+    save();
+    renderCart();
+  } else {
+    showToast('❌ Invalid coupon code');
+  }
+}
+
+// ══════════════════════════════════════════
+// CHECKOUT
+// ══════════════════════════════════════════
+function openCheckout() {
+  if (!cart.length) return;
+  document.getElementById('co-step-1').style.display = 'block';
+  document.getElementById('co-step-2').style.display = 'none';
+  document.getElementById('co-step-3').style.display = 'none';
+  updateStepUI(1);
+  document.getElementById('co-modal').classList.add('show');
+}
+
+function closeCoModal() {
+  document.getElementById('co-modal').classList.remove('show');
+}
+
+function updateStepUI(step) {
+  for (let i = 1; i <= 3; i++) {
+    const el = document.getElementById('si-' + i);
+    el.className = 'step-circle ' + (i < step ? 'done' : i === step ? 'active' : 'pending');
+    if (i < step) el.textContent = '✓';
+    else el.textContent = i;
+  }
+  for (let i = 1; i <= 2; i++) {
+    document.getElementById('sl-' + i).className = 'step-line' + (i < step ? ' done' : '');
+  }
+}
+
+function selectPay(method) {
+  selectedPay = method;
+  ['zemen','telebirr','cbe','cod'].forEach(m => {
+    const el = document.getElementById('pay-' + m);
+    el.classList.toggle('active', m === method);
+    el.querySelector('.pay-check').textContent = m === method ? '✓' : '';
+  });
+}
+
+function coNext(step) {
+  if (step === 1) {
+    const name = document.getElementById('co-name').value.trim();
+    const phone = document.getElementById('co-phone').value.trim();
+    const city = document.getElementById('co-city').value;
+    const addr = document.getElementById('co-address').value.trim();
+    if (!name || !phone || !city || !addr) { showToast('⚠️ Please fill all fields'); return; }
+    document.getElementById('co-step-1').style.display = 'none';
+    document.getElementById('co-step-2').style.display = 'block';
+    updateStepUI(2);
+  } else if (step === 2) {
+    // Populate confirm step
+    const { sub, delivery, discount, total } = getCartTotals();
+    document.getElementById('co-order-items').innerHTML = cart.map(x => {
+      const p = PRODUCTS.find(pp => pp.id === x.id);
+      return `<div style="display:flex;justify-content:space-between;font-size:13px;padding:5px 0;border-bottom:1px solid var(--border)">
+        <span>${p.emoji} ${p.name} ×${x.qty}</span>
+        <span style="font-weight:700">${fmt(p.price * x.qty)}</span>
+      </div>`;
+    }).join('');
+    document.getElementById('co-sub').textContent = fmt(sub);
+    document.getElementById('co-del').textContent = sub >= 1000 ? 'Free' : fmt(delivery);
+    document.getElementById('co-total').textContent = fmt(total);
+    const drow = document.getElementById('co-disc-row');
+    if (discount) { drow.style.display = 'flex'; document.getElementById('co-disc').textContent = '-' + fmt(discount); }
+    else drow.style.display = 'none';
+
+    const payNames = {zemen:'Zemen Bank',telebirr:'Telebirr',cbe:'CBE Birr',cod:'Cash on Delivery'};
+    document.getElementById('co-ship-review').innerHTML =
+      `<b>📍 ${document.getElementById('co-city').value}</b><br>` +
+      `${document.getElementById('co-address').value}<br>` +
+      `${document.getElementById('co-name').value} · ${document.getElementById('co-phone').value}<br>` +
+      `💳 ${payNames[selectedPay]}`;
+
+    document.getElementById('co-step-2').style.display = 'none';
+    document.getElementById('co-step-3').style.display = 'block';
+    updateStepUI(3);
+  }
+}
+
+function placeOrder() {
+  const { total } = getCartTotals();
+  const ref = 'ZB-' + Date.now().toString().slice(-6);
+  const order = {
+    id: ref,
+    date: new Date().toLocaleDateString('en-ET'),
+    items: cart.map(x => ({ id: x.id, qty: x.qty })),
+    total,
+    status: 'processing',
+    address: document.getElementById('co-city').value + ', ' + document.getElementById('co-address').value,
+    payment: selectedPay,
+  };
+  orders.unshift(order);
+  cart = [];
+  coupon = '';
+  save();
+  updateBadges();
+  closeCoModal();
+  document.getElementById('success-ref').textContent = '#' + ref;
+  document.getElementById('success-modal').classList.add('show');
+}
+
+function closeSuccess() {
+  document.getElementById('success-modal').classList.remove('show');
+}
+
+// ══════════════════════════════════════════
+// ORDERS
+// ══════════════════════════════════════════
+function renderOrders() {
+  const empty = document.getElementById('orders-empty');
+  const list = document.getElementById('orders-list');
+  if (!orders.length) { empty.style.display = 'block'; list.innerHTML = ''; return; }
+  empty.style.display = 'none';
+  const statusLabels = { processing:'Processing', shipped:'Shipped', delivered:'Delivered' };
+  list.innerHTML = orders.map(o => {
+    const preview = o.items.map(x => {
+      const p = PRODUCTS.find(pp => pp.id === x.id);
+      return p ? `${p.emoji} ${p.name}` : '';
+    }).slice(0, 2).join(', ') + (o.items.length > 2 ? ` +${o.items.length - 2} more` : '');
+    return `<div class="order-card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+        <span style="font-weight:700;font-size:14px">#${o.id}</span>
+        <span class="order-status status-${o.status}">${statusLabels[o.status] || o.status}</span>
+      </div>
+      <div class="order-date">📅 ${o.date}</div>
+      <div class="order-items-preview">${preview}</div>
+      <div class="order-total-row">
+        <span style="font-size:12px;color:var(--text3)">📍 ${o.address}</span>
+        <span style="font-weight:800;color:var(--primary)">${fmt(o.total)}</span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ══════════════════════════════════════════
+// WISHLIST
+// ══════════════════════════════════════════
+function toggleWish(id) {
+  if (wishlist.includes(id)) wishlist = wishlist.filter(x => x !== id);
+  else wishlist.push(id);
+  save();
+  updateBadges();
+  // update card hearts
+  const wb = document.getElementById('wb-' + id);
+  if (wb) wb.textContent = wishlist.includes(id) ? '❤️' : '🤍';
+  showToast(wishlist.includes(id) ? '❤️ Added to wishlist' : '🤍 Removed from wishlist');
+}
+
+function openWishlist() {
+  const list = document.getElementById('wl-list');
+  if (!wishlist.length) {
+    list.innerHTML = '<div class="empty"><div class="empty-icon">🤍</div><div class="empty-title">No wishlist items</div><div class="empty-sub">Tap the heart on any product to save it</div></div>';
+  } else {
+    list.innerHTML = wishlist.map(id => {
+      const p = PRODUCTS.find(x => x.id === id);
+      return `<div class="hcard" style="margin-bottom:10px" onclick="document.getElementById('wl-modal').classList.remove('show');openProduct(${p.id})">
+        <div class="hcard-img">${p.emoji}</div>
+        <div class="hcard-info">
+          <div><div class="hcard-name">${p.name}</div></div>
+          <div style="display:flex;align-items:center;justify-content:space-between">
+            <span class="hcard-price">${fmt(p.price)}</span>
+            <button class="hcard-add" onclick="event.stopPropagation();addToCart(${p.id});showToast('🛒 Added!')">Add</button>
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+  }
+  document.getElementById('wl-modal').classList.add('show');
+}
+
+function closeWlModal(e) {
+  if (e.target === document.getElementById('wl-modal'))
+    document.getElementById('wl-modal').classList.remove('show');
+}
+
+// ══════════════════════════════════════════
+// PROFILE
+// ══════════════════════════════════════════
+function renderProfile() {
+  document.getElementById('ps-orders').textContent = orders.length;
+  document.getElementById('ps-wishlist').textContent = wishlist.length;
+  const spent = orders.reduce((s, o) => s + o.total, 0);
+  document.getElementById('ps-spent').textContent = spent >= 1000 ? (spent/1000).toFixed(1)+'K' : spent;
+}
+
+function openAddresses() {
+  showToast('📍 Addresses feature coming soon!');
+}
+function openNotifSettings() {
+  showToast('🔔 Notifications feature coming soon!');
+}
+function openHelp() {
+  showToast('💬 Support: Call 8397 (Zemen Bank)');
+}
+
+// ══════════════════════════════════════════
+// BADGES & TOAST
+// ══════════════════════════════════════════
+function updateBadges() {
+  const count = cart.reduce((s, x) => s + x.qty, 0);
+  ['cart-badge', 'header-cart-badge'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) { el.style.display = count ? 'flex' : 'none'; el.textContent = count > 9 ? '9+' : count; }
+  });
+}
+
+let toastTimer;
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 2400);
+}
+
+// ══════════════════════════════════════════
+// INIT
+// ══════════════════════════════════════════
+renderHome();
+renderShopCats();
+renderShop();
+updateBadges();
+</script>
+</body>
+</html>

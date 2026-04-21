@@ -1,0 +1,17 @@
+# Go binaries
+*.exe
+*.test
+*.out
+server
+cmd
+
+# Env (secrets)
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# Uploaded files
+uploads/

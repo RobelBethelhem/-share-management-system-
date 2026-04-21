@@ -1,0 +1,311 @@
+package handlers
+
+import (
+	"fmt"
+	"net/http"
+	"strconv"
+	"time"
+
+	"share-management-system/internal/database"
+	"share-management-system/internal/models"
+
+	"github.com/gin-gonic/gin"
+)
+
+func GetPendingApprovals(c *gin.Context) {
+	var approvals []models.PendingApproval
+	query := database.DB
+
+	if entityType := c.Query("entity_type"); entityType != "" {
+		query = query.Where("entity_type = ?", entityType)
+	}
+	statusFilter := c.Query("status")
+	if statusFilter != "" && statusFilter != "all" {
+		query = query.Where("status = ?", statusFilter)
+	} else if statusFilter == "" {
+		query = query.Where("status = ?", "pending")
+	}
+	// status=all shows everything
+
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+	var total int64
+	query.Model(&models.PendingApproval{}).Count(&total)
+	offset := (page - 1) * pageSize
+	query.Offset(offset).Limit(pageSize).Order("id DESC").Find(&approvals)
+
+	c.JSON(http.StatusOK, gin.H{"data": approvals, "total": total, "page": page, "page_size": pageSize})
+}
+
+
+func ApproveItem(c *gin.Context) {
+	id := c.Param("id")
+	var approval models.PendingApproval
+	if err := database.DB.First(&approval, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Approval not found"})
+		return
+	}
+
+	now := time.Now()
+	uid := getUserID(c)
+	approval.Status = "approved"
+	approval.ApprovedBy = &uid
+	approval.ProcessedAt = &now
+	database.DB.Save(&approval)
+
+	// Update the entity's approval status and run business logic
+	switch approval.EntityType {
+	case "investment":
+		database.DB.Model(&models.Investment{}).Where("id = ?", approval.EntityID).Update("approval_status", "approved")
+	case "transfer":
+		if err := RunTransferApproval(approval.EntityID); err != nil {
+			// Revert the pending_approval so it can be retried
+			approval.Status = "pending"
+			approval.ApprovedBy = nil
+			approval.ProcessedAt = nil
+			database.DB.Save(&approval)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Transfer approval failed: " + err.Error()})
+			return
+		}
+	case "subscription":
+		database.DB.Model(&models.Subscription{}).Where("id = ?", approval.EntityID).Update("approval_status", "approved")
+	case "block":
+		database.DB.Model(&models.ShareBlock{}).Where("id = ?", approval.EntityID).Update("approval_status", "approved")
+	case "dividend":
+		database.DB.Model(&models.Dividend{}).Where("id = ?", approval.EntityID).Update("approval_status", "approved")
+	case "trade_request":
+		executeTradeApproval(approval.EntityID)
+	case "proxy":
+		database.DB.Model(&models.AGMProxy{}).Where("id = ?", approval.EntityID).Update("status", "approved")
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Item approved"})
+}
+
+// executeTradeApproval creates a Transfer from an approved marketplace trade request
+func executeTradeApproval(tradeID uint) {
+	var trade models.TradeRequest
+	if err := database.DB.First(&trade, tradeID).Error; err != nil {
+		return
+	}
+
+	trade.Status = "approved"
+	database.DB.Save(&trade)
+
+	// Get par value
+	var bankCapital models.BankCapital
+	database.DB.First(&bankCapital)
+	parValue := bankCapital.ParValuePerShare
+
+	transferAmount := float64(trade.NumberOfShares) * trade.PricePerShare
+
+	// Calculate fees using system settings
+	cgtRate := getTradeSettingFloat("capital_gain_tax_rate", 15)
+	sfRate := getTradeSettingFloat("transfer_service_fee_rate", 1)
+	sdRate := getTradeSettingFloat("transfer_stamp_duty_rate", 0.5)
+	vatRate := getTradeSettingFloat("transfer_vat_rate", 15)
+
+	capitalGainTax := transferAmount * cgtRate / 100
+	serviceFee := transferAmount * sfRate / 100
+	stampDuty := transferAmount * sdRate / 100
+	vat := serviceFee * vatRate / 100
+	totalFees := capitalGainTax + serviceFee + stampDuty + vat
+
+	batchNo := fmt.Sprintf("MKT-%d", time.Now().UnixMilli())
+	now := time.Now()
+
+	// Create Transfer using the existing transfer model
+	transfer := models.Transfer{
+		BatchNo:        batchNo,
+		TransferorID:   trade.SellerID,
+		TransfereeID:   trade.BuyerID,
+		TransferType:   "sale",
+		TransferDate:   &now,
+		NumberOfShares: trade.NumberOfShares,
+		ParValue:       parValue,
+		TransferAmount: transferAmount,
+		CapitalGainTax: capitalGainTax,
+		ServiceFee:     serviceFee,
+		StampDuty:      stampDuty,
+		VAT:            vat,
+		TotalFees:      totalFees,
+		Status:         "approved",
+		ApprovalStatus: "approved",
+	}
+	database.DB.Create(&transfer)
+
+	// Record service charge (same as admin transfer flow)
+	database.DB.Create(&models.ServiceCharge{
+		ShareholderID: trade.SellerID,
+		ChargeType:    "transfer",
+		Amount:        totalFees,
+		ReferenceType: "transfer",
+		ReferenceID:   transfer.ID,
+		ChargeDate:    &now,
+		Remark:        "Marketplace sale - " + batchNo,
+	})
+
+	// Link transfer to trade request
+	trade.TransferID = &transfer.ID
+	trade.Status = "completed"
+	database.DB.Save(&trade)
+
+	// Update listing status
+	database.DB.Model(&models.ShareListing{}).Where("id = ?", trade.ListingID).
+		Update("status", "completed")
+
+	// Execute the actual share transfer
+	RunTransferApproval(transfer.ID) //nolint:errcheck — trade approvals are fire-and-forget
+}
+
+func getTradeSettingFloat(key string, defaultVal float64) float64 {
+	var setting models.SystemSetting
+	if err := database.DB.Where("`key` = ?", key).First(&setting).Error; err != nil {
+		return defaultVal
+	}
+	val, err := strconv.ParseFloat(setting.Value, 64)
+	if err != nil {
+		return defaultVal
+	}
+	return val
+}
+
+// ApproveByEntity approves a pending approval by entity_type and entity_id
+// This allows approving directly from entity pages (e.g. Subscriptions, Investments)
+func ApproveByEntity(c *gin.Context) {
+	entityType := c.Param("entity_type")
+	entityID := c.Param("entity_id")
+
+	var approval models.PendingApproval
+	if err := database.DB.Where("entity_type = ? AND entity_id = ? AND status = ?", entityType, entityID, "pending").
+		First(&approval).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "No pending approval found for this item"})
+		return
+	}
+
+	now := time.Now()
+	uid := getUserID(c)
+	approval.Status = "approved"
+	approval.ApprovedBy = &uid
+	approval.ProcessedAt = &now
+	database.DB.Save(&approval)
+
+	// Update the entity's approval status and run business logic
+	switch approval.EntityType {
+	case "investment":
+		database.DB.Model(&models.Investment{}).Where("id = ?", approval.EntityID).Update("approval_status", "approved")
+	case "transfer":
+		if err := RunTransferApproval(approval.EntityID); err != nil {
+			approval.Status = "pending"
+			approval.ApprovedBy = nil
+			approval.ProcessedAt = nil
+			database.DB.Save(&approval)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Transfer approval failed: " + err.Error()})
+			return
+		}
+	case "subscription":
+		database.DB.Model(&models.Subscription{}).Where("id = ?", approval.EntityID).Update("approval_status", "approved")
+	case "block":
+		database.DB.Model(&models.ShareBlock{}).Where("id = ?", approval.EntityID).Update("approval_status", "approved")
+	case "dividend":
+		database.DB.Model(&models.Dividend{}).Where("id = ?", approval.EntityID).Update("approval_status", "approved")
+	case "trade_request":
+		executeTradeApproval(approval.EntityID)
+	case "proxy":
+		database.DB.Model(&models.AGMProxy{}).Where("id = ?", approval.EntityID).Update("status", "approved")
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Item approved"})
+}
+
+// RejectByEntity rejects a pending approval by entity_type and entity_id
+func RejectByEntity(c *gin.Context) {
+	entityType := c.Param("entity_type")
+	entityID := c.Param("entity_id")
+
+	var input struct {
+		Remark string `json:"remark"`
+	}
+	c.ShouldBindJSON(&input)
+
+	var approval models.PendingApproval
+	if err := database.DB.Where("entity_type = ? AND entity_id = ? AND status = ?", entityType, entityID, "pending").
+		First(&approval).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "No pending approval found for this item"})
+		return
+	}
+
+	now := time.Now()
+	uid := getUserID(c)
+	approval.Status = "rejected"
+	approval.ApprovedBy = &uid
+	approval.ProcessedAt = &now
+	approval.Remark = input.Remark
+	database.DB.Save(&approval)
+
+	// Update entity
+	switch approval.EntityType {
+	case "investment":
+		database.DB.Model(&models.Investment{}).Where("id = ?", approval.EntityID).Update("approval_status", "rejected")
+	case "transfer":
+		database.DB.Model(&models.Transfer{}).Where("id = ?", approval.EntityID).Update("approval_status", "rejected")
+	case "subscription":
+		database.DB.Model(&models.Subscription{}).Where("id = ?", approval.EntityID).Update("approval_status", "rejected")
+	case "block":
+		database.DB.Model(&models.ShareBlock{}).Where("id = ?", approval.EntityID).Update("approval_status", "rejected")
+	case "trade_request":
+		database.DB.Model(&models.TradeRequest{}).Where("id = ?", approval.EntityID).Update("status", "rejected")
+		var rejTrade models.TradeRequest
+		if database.DB.First(&rejTrade, approval.EntityID).Error == nil {
+			database.DB.Model(&models.ShareListing{}).Where("id = ?", rejTrade.ListingID).Update("status", "active")
+		}
+	case "proxy":
+		database.DB.Model(&models.AGMProxy{}).Where("id = ?", approval.EntityID).Update("status", "rejected")
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Item rejected"})
+}
+
+func RejectItem(c *gin.Context) {
+	id := c.Param("id")
+	var input struct {
+		Remark string `json:"remark"`
+	}
+	c.ShouldBindJSON(&input)
+
+	var approval models.PendingApproval
+	if err := database.DB.First(&approval, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Approval not found"})
+		return
+	}
+
+	now := time.Now()
+	uid := getUserID(c)
+	approval.Status = "rejected"
+	approval.ApprovedBy = &uid
+	approval.ProcessedAt = &now
+	approval.Remark = input.Remark
+	database.DB.Save(&approval)
+
+	// Update entity
+	switch approval.EntityType {
+	case "investment":
+		database.DB.Model(&models.Investment{}).Where("id = ?", approval.EntityID).Update("approval_status", "rejected")
+	case "transfer":
+		database.DB.Model(&models.Transfer{}).Where("id = ?", approval.EntityID).Update("approval_status", "rejected")
+	case "subscription":
+		database.DB.Model(&models.Subscription{}).Where("id = ?", approval.EntityID).Update("approval_status", "rejected")
+	case "block":
+		database.DB.Model(&models.ShareBlock{}).Where("id = ?", approval.EntityID).Update("approval_status", "rejected")
+	case "trade_request":
+		database.DB.Model(&models.TradeRequest{}).Where("id = ?", approval.EntityID).Update("status", "rejected")
+		var rejTrade models.TradeRequest
+		if database.DB.First(&rejTrade, approval.EntityID).Error == nil {
+			database.DB.Model(&models.ShareListing{}).Where("id = ?", rejTrade.ListingID).Update("status", "active")
+		}
+	case "proxy":
+		database.DB.Model(&models.AGMProxy{}).Where("id = ?", approval.EntityID).Update("status", "rejected")
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Item rejected"})
+}

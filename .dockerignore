@@ -1,0 +1,30 @@
+# Build artifacts
+backend/*.exe
+backend/*.log
+backend/uploads/
+backend/.env
+backend/.env.*
+!backend/.env.example
+
+# Frontend (not needed inside the backend image)
+frontend/node_modules
+frontend/dist
+frontend/dist-ssr
+
+# Mobile (not needed inside the backend image)
+mobile/node_modules
+mobile/.expo
+mobile/android
+mobile/ios
+
+# VCS + editor
+.git
+.gitignore
+.vscode
+.idea
+*.DS_Store
+
+# Docs / scripts / misc
+README.md
+*.py
+start.sh

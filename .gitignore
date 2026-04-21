@@ -1,0 +1,56 @@
+# Secrets — never commit
+**/.env
+**/.env.*
+!**/.env.example
+
+# Go build artifacts
+*.exe
+*.test
+*.out
+backend/server.log
+backend/*.log
+
+# Runtime uploads (user content; use a cloud volume in prod)
+backend/uploads/
+
+# Node / frontend / mobile
+node_modules/
+dist/
+dist-ssr/
+build/
+.expo/
+web-build/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Mobile app — has its own git repo, tracked separately (not deployed via Vercel/Railway)
+/mobile/
+
+# Mobile native (kept for reference if mobile is ever re-included)
+/mobile/ios/
+/mobile/android/
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.pem
+
+# Editors / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.suo
+.DS_Store
+Thumbs.db
+
+# Claude Code local config
+.claude/
+
+# Python helper scripts (local only)
+__pycache__/
+*.pyc

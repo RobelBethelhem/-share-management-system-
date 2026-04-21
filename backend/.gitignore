@@ -1,9 +1,11 @@
-# Go binaries
+# Go binaries (bare names match legacy stray binaries at backend root;
+# NOT used as patterns — keep specific to files, never directories)
 *.exe
 *.test
 *.out
-server
-cmd
+/server
+/share-admin
+/share-management-system
 
 # Env (secrets)
 .env

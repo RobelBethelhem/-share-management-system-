@@ -139,6 +139,10 @@ export const testFormula = (data) => api.post('/system-settings/test-formula', d
 export const getBankCapital = () => api.get('/bank-capital');
 export const updateBankCapital = (data) => api.put('/bank-capital', data);
 
+// Admin — destructive
+export const resetAllData = (confirmation) =>
+  api.post('/admin/reset-data', { confirmation });
+
 // Share Splits
 export const getShareSplits = () => api.get('/share-splits');
 export const createShareSplit = (data) => api.post('/share-splits', data);

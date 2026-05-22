@@ -6,11 +6,11 @@ import {
 } from 'antd';
 import {
   SaveOutlined, PlusOutlined, DeleteOutlined, ExperimentOutlined,
-  BankOutlined, SettingOutlined, EditOutlined,
+  BankOutlined, SettingOutlined, EditOutlined, WarningOutlined,
 } from '@ant-design/icons';
 import {
   getSystemSettings, createSystemSetting, updateSystemSetting, deleteSystemSetting,
-  testFormula, getBankCapital, updateBankCapital,
+  testFormula, getBankCapital, updateBankCapital, resetAllData,
 } from '../services/api';
 import { formatCurrency } from '../utils/format';
 
@@ -28,6 +28,27 @@ export default function SystemSettings() {
   const [testModal, setTestModal] = useState(null);
   const [testForm] = Form.useForm();
   const [testResult, setTestResult] = useState(null);
+  const [resetModal, setResetModal] = useState(false);
+  const [resetConfirmText, setResetConfirmText] = useState('');
+  const [resetLoading, setResetLoading] = useState(false);
+  const [resetResult, setResetResult] = useState(null);
+
+  const handleResetAllData = async () => {
+    if (resetConfirmText.trim() !== 'RESET') {
+      message.error('You must type RESET (uppercase) exactly to confirm.');
+      return;
+    }
+    setResetLoading(true);
+    try {
+      const res = await resetAllData(resetConfirmText.trim());
+      setResetResult(res.data);
+      message.success('All business data wiped. Defaults re-seeded.');
+      await fetchData();
+    } catch (e) {
+      message.error(e.response?.data?.error || 'Reset failed');
+    }
+    setResetLoading(false);
+  };
 
   const fetchData = async () => {
     setLoading(true);
@@ -351,6 +372,120 @@ export default function SystemSettings() {
                 )}
               </Card>
             )}
+          </>
+        )}
+      </Modal>
+
+      {/* Danger Zone: wipe all business data while preserving login users */}
+      <Card
+        size="small"
+        style={{ marginTop: 24, borderColor: '#ff4d4f' }}
+        title={
+          <Space>
+            <WarningOutlined style={{ color: '#cf1322' }} />
+            <Text strong style={{ color: '#cf1322' }}>Danger Zone</Text>
+          </Space>
+        }
+      >
+        <Alert
+          type="error"
+          showIcon
+          message="Reset all data"
+          description={
+            <div>
+              <div>Wipes <b>every business table</b> in the database (shareholders, investments, subscriptions, allocations, transfers, dividends, blocks, certificates, capital increases, AGM data, mini-app data, system settings, bank capital, tax schedules, &hellip;) and resets auto-increment IDs to 1.</div>
+              <div style={{ marginTop: 6 }}>
+                <b>Preserved:</b> <Tag color="green">users (login accounts)</Tag>
+              </div>
+              <div style={{ marginTop: 6 }}>
+                <b>After wipe:</b> default system settings (par value, fees, formulas, tax schedule, mini-app categories) are re-seeded automatically so the system is immediately usable.
+              </div>
+              <div style={{ marginTop: 6, color: '#cf1322' }}>
+                <b>This cannot be undone.</b> Take a database backup first if there is any chance you'll want the data back.
+              </div>
+            </div>
+          }
+        />
+        <Button
+          danger
+          type="primary"
+          icon={<DeleteOutlined />}
+          style={{ marginTop: 12 }}
+          onClick={() => { setResetConfirmText(''); setResetResult(null); setResetModal(true); }}
+        >
+          Reset All Data&hellip;
+        </Button>
+      </Card>
+
+      <Modal
+        open={resetModal}
+        title={<Space><WarningOutlined style={{ color: '#cf1322' }} /><Text strong style={{ color: '#cf1322' }}>Confirm: Reset All Data</Text></Space>}
+        onCancel={() => setResetModal(false)}
+        footer={resetResult ? (
+          <Button type="primary" onClick={() => setResetModal(false)}>Close</Button>
+        ) : (
+          <Space>
+            <Button onClick={() => setResetModal(false)}>Cancel</Button>
+            <Button
+              danger type="primary" loading={resetLoading}
+              disabled={resetConfirmText.trim() !== 'RESET'}
+              onClick={handleResetAllData}
+            >
+              Wipe Database
+            </Button>
+          </Space>
+        )}
+        maskClosable={!resetLoading}
+        closable={!resetLoading}
+        width={560}
+      >
+        {!resetResult ? (
+          <>
+            <Alert
+              type="warning"
+              showIcon
+              message="Irreversible operation"
+              description="Every business record will be deleted. Only the users (login accounts) table is preserved."
+              style={{ marginBottom: 16 }}
+            />
+            <Text>Type <Text code strong>RESET</Text> (uppercase) below to enable the Wipe button:</Text>
+            <Input
+              placeholder="Type RESET"
+              value={resetConfirmText}
+              onChange={(e) => setResetConfirmText(e.target.value)}
+              style={{ marginTop: 8 }}
+              autoFocus
+            />
+          </>
+        ) : (
+          <>
+            <Alert
+              type="success"
+              showIcon
+              message={resetResult.message || 'Reset complete'}
+              style={{ marginBottom: 12 }}
+            />
+            <Descriptions size="small" column={1} bordered>
+              <Descriptions.Item label="Tables cleared">
+                <Text strong>{resetResult.cleared_tables?.length || 0}</Text>
+              </Descriptions.Item>
+              <Descriptions.Item label="Tables preserved">
+                {(resetResult.preserved || []).map(t => <Tag key={t} color="green">{t}</Tag>)}
+              </Descriptions.Item>
+              {Object.keys(resetResult.failed_tables || {}).length > 0 && (
+                <Descriptions.Item label="Failures">
+                  {Object.entries(resetResult.failed_tables).map(([t, err]) => (
+                    <div key={t}><Tag color="red">{t}</Tag> <Text type="danger" style={{ fontSize: 11 }}>{err}</Text></div>
+                  ))}
+                </Descriptions.Item>
+              )}
+            </Descriptions>
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginTop: 12 }}
+              message="Refresh the page (or re-login) to see the empty system. Default settings have been re-seeded."
+            />
           </>
         )}
       </Modal>

@@ -356,6 +356,9 @@ func main() {
 			reports.GET("/influential-shareholders", handlers.InfluentialShareholdersReport)
 			reports.GET("/allocations", handlers.AllocationReport)
 		}
+
+		// Admin — destructive maintenance endpoints. AdminOnly + body-token guard.
+		api.POST("/admin/reset-data", middleware.AdminOnly(), handlers.ResetData)
 	}
 
 	// Honor $PORT when set (Railway/Render/Fly inject it); else fall back to SERVER_PORT from config

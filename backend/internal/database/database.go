@@ -95,13 +95,16 @@ func Initialize(cfg *config.Config) *gorm.DB {
 	}
 	DB.Exec("ALTER TABLE agm_proxies DROP COLUMN proxy_shareholder_id")
 
-	seedDefaultData(DB)
+	SeedDefaultData(DB)
 
 	fmt.Println("Database connected and migrated successfully")
 	return DB
 }
 
-func seedDefaultData(db *gorm.DB) {
+// SeedDefaultData populates default system settings, tax schedules, bank
+// capital, and mini-app categories. Exported so the admin Reset Data
+// endpoint can re-seed after wiping all business tables.
+func SeedDefaultData(db *gorm.DB) {
 	var count int64
 	db.Model(&models.User{}).Count(&count)
 	if count == 0 {

@@ -393,15 +393,23 @@ export default function SystemSettings() {
           message="Reset all data"
           description={
             <div>
-              <div>Wipes <b>every business table</b> in the database (shareholders, investments, subscriptions, allocations, transfers, dividends, blocks, certificates, capital increases, AGM data, mini-app data, system settings, bank capital, tax schedules, &hellip;) and resets auto-increment IDs to 1.</div>
-              <div style={{ marginTop: 6 }}>
-                <b>Preserved:</b> <Tag color="green">users (login accounts)</Tag>
+              <div><b>Wiped:</b> shareholders, investments, subscriptions, allocations, transfers, dividends, blocks, certificates, capital increases, AGM data, dividend settings, audit logs, &hellip; (auto-increment IDs reset to 1).</div>
+              <div style={{ marginTop: 8 }}>
+                <b>Preserved (Formulas &amp; Configuration):</b>
+                <div style={{ marginTop: 4 }}>
+                  <Tag color="green">users</Tag>
+                  <Tag color="green">system_settings</Tag>
+                  <Tag color="green">bank_capital</Tag>
+                  <Tag color="green">dividend_tax_schedules</Tag>
+                  <Tag color="green">mini_app_categories</Tag>
+                  <Tag color="green">mini_apps</Tag>
+                </div>
+                <div style={{ marginTop: 4, fontSize: 12, color: '#666' }}>
+                  Your customized formulas (tax, share calc, transfer fee), fee rates, par value, authorized capital, and tax brackets all survive the reset.
+                </div>
               </div>
-              <div style={{ marginTop: 6 }}>
-                <b>After wipe:</b> default system settings (par value, fees, formulas, tax schedule, mini-app categories) are re-seeded automatically so the system is immediately usable.
-              </div>
-              <div style={{ marginTop: 6, color: '#cf1322' }}>
-                <b>This cannot be undone.</b> Take a database backup first if there is any chance you'll want the data back.
+              <div style={{ marginTop: 8, color: '#cf1322' }}>
+                <b>This cannot be undone.</b> Take a database backup first if there is any chance you'll want the wiped data back.
               </div>
             </div>
           }

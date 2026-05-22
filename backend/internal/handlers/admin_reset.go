@@ -6,8 +6,10 @@ import (
 	"strings"
 
 	"share-management-system/internal/database"
+	"share-management-system/internal/models"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 type resetDataReq struct {
@@ -40,6 +42,33 @@ func ResetData(c *gin.Context) {
 		return
 	}
 
+	// Tables to keep — login accounts + Formulas & Configuration. These are
+	// not business data and the operator's customizations (custom tax brackets,
+	// edited transfer fee formula, adjusted par value, etc.) must survive a
+	// reset. SeedDefaultData is still called afterwards as a safety net so
+	// any missing default rows reappear.
+	//
+	// Names are derived from the GORM models themselves (via Statement.Parse)
+	// so they always match what AutoMigrate created — no risk of drift if
+	// GORM's pluralization changes or a model gains a TableName() override.
+	preservedModels := []interface{}{
+		&models.User{},                // admin login accounts
+		&models.SystemSetting{},       // tax_formula, share_calc_formula, transfer fees, tax rate
+		&models.BankCapital{},         // authorized capital, par value, total shares
+		&models.DividendTaxSchedule{}, // dividend tax brackets
+		&models.MiniAppCategory{},     // mini-app categories
+		&models.MiniApp{},             // mini-app registry
+	}
+	preserved := map[string]bool{}
+	preservedList := []string{}
+	for _, m := range preservedModels {
+		stmt := &gorm.Statement{DB: database.DB}
+		if err := stmt.Parse(m); err == nil && stmt.Schema != nil {
+			preserved[stmt.Schema.Table] = true
+			preservedList = append(preservedList, stmt.Schema.Table)
+		}
+	}
+
 	// Disable FK checks so we don't need a topologically-sorted truncate order.
 	if err := database.DB.Exec("SET FOREIGN_KEY_CHECKS=0").Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -50,7 +79,7 @@ func ResetData(c *gin.Context) {
 	cleared := []string{}
 	failed := map[string]string{}
 	for _, t := range tables {
-		if t == "users" {
+		if preserved[t] {
 			continue
 		}
 		if err := database.DB.Exec("TRUNCATE TABLE `" + t + "`").Error; err != nil {
@@ -60,7 +89,8 @@ func ResetData(c *gin.Context) {
 		cleared = append(cleared, t)
 	}
 
-	// Re-seed defaults so the system is usable immediately after reset.
+	// Re-seed defaults — idempotent (each block checks count == 0 first), so
+	// preserved customizations are NOT overwritten; only missing rows reappear.
 	database.SeedDefaultData(database.DB)
 
 	actor, _ := c.Get("username")
@@ -71,7 +101,7 @@ func ResetData(c *gin.Context) {
 		"success":        true,
 		"cleared_tables": cleared,
 		"failed_tables":  failed,
-		"preserved":      []string{"users"},
-		"message":        "All business data wiped and default settings re-seeded.",
+		"preserved":      preservedList,
+		"message":        "Business data wiped. Formulas, configuration, login accounts preserved.",
 	})
 }

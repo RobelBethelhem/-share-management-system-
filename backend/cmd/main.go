@@ -27,20 +27,43 @@ func main() {
 	r.Static("/uploads", uploadDir)
 	r.Static("/mini-apps/ecommerce", miniAppsDir)
 
-	// CORS — localhost origins are always allowed; production origins via ALLOWED_ORIGINS env (comma-separated)
-	origins := []string{"http://localhost:5173", "http://localhost:5174", "http://localhost:3000", "http://localhost:8081", "http://localhost:19006"}
+	// CORS — accept any localhost port, any *.vercel.app subdomain (so Vercel
+	// preview/prod URL changes never break CORS), plus any explicit origins
+	// from ALLOWED_ORIGINS env (comma-separated, exact match).
+	extraOrigins := map[string]bool{}
 	if extra := os.Getenv("ALLOWED_ORIGINS"); extra != "" {
 		for _, o := range strings.Split(extra, ",") {
 			if trimmed := strings.TrimSpace(o); trimmed != "" {
-				origins = append(origins, trimmed)
+				extraOrigins[trimmed] = true
 			}
 		}
 	}
 	r.Use(cors.New(cors.Config{
-		AllowOrigins:     origins,
+		AllowOriginFunc: func(origin string) bool {
+			if origin == "" {
+				return false
+			}
+			// localhost dev (any port, http or https)
+			if strings.HasPrefix(origin, "http://localhost:") ||
+				strings.HasPrefix(origin, "http://127.0.0.1:") ||
+				strings.HasPrefix(origin, "https://localhost:") {
+				return true
+			}
+			// Any Vercel preview or production URL
+			if strings.HasSuffix(origin, ".vercel.app") {
+				return true
+			}
+			// Any Railway-hosted origin (for backend-to-backend or admin tools)
+			if strings.HasSuffix(origin, ".up.railway.app") {
+				return true
+			}
+			// Custom domains explicitly listed in env
+			return extraOrigins[origin]
+		},
 		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
 		AllowCredentials: true,
+		MaxAge:           86400, // cache preflight 24h
 	}))
 
 	// Public routes

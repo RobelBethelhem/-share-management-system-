@@ -7,7 +7,7 @@ import {
   TeamOutlined, CheckCircleOutlined, BarChartOutlined, SettingOutlined,
   MenuFoldOutlined, MenuUnfoldOutlined, LogoutOutlined, FundOutlined,
   ContainerOutlined, SplitCellsOutlined, NotificationOutlined, FolderOpenOutlined,
-  AppstoreOutlined,
+  AppstoreOutlined, RiseOutlined,
 } from '@ant-design/icons';
 import { useAuth } from '../context/AuthContext';
 
@@ -18,6 +18,13 @@ const menuItems = [
   { key: '/shareholders', icon: <UserOutlined />, label: 'Shareholders' },
   { key: '/subscriptions', icon: <FileTextOutlined />, label: 'Subscriptions' },
   { key: '/allocations', icon: <ContainerOutlined />, label: 'Allocations' },
+  {
+    key: 'ci-group', icon: <RiseOutlined />, label: 'Capital Increase',
+    children: [
+      { key: '/capital-increases', label: 'Campaigns' },
+      { key: '/capital-increase-additional', label: 'Additional Requests' },
+    ],
+  },
   { key: '/investments', icon: <BankOutlined />, label: 'Investments' },
   { key: '/transfers', icon: <SwapOutlined />, label: 'Transfers' },
   {
@@ -47,7 +54,7 @@ export default function AppLayout() {
   const { token: { colorBgContainer, borderRadiusLG } } = theme.useToken();
 
   const handleMenuClick = ({ key }) => {
-    if (key !== 'dividends-group') navigate(key);
+    if (key !== 'dividends-group' && key !== 'ci-group') navigate(key);
   };
 
   const userMenuItems = [

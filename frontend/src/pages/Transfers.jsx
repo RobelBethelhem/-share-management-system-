@@ -1,18 +1,43 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Table, Button, Modal, Form, Input, Select, InputNumber, DatePicker,
-  Space, Tag, message, Typography, Row, Col, Switch, Card, Divider, Spin, Radio,
+  Space, Tag, Tooltip, message, Typography, Row, Col, Switch, Card, Divider, Spin, Radio,
 } from 'antd';
 import {
-  PlusOutlined, InfoCircleOutlined, SearchOutlined,
+  PlusOutlined, InfoCircleOutlined, SearchOutlined, FilterOutlined,
   CheckCircleOutlined, ClockCircleOutlined, MinusCircleOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import {
   getTransfers, createTransfer, calculateTransferFees, searchShareholders,
   getShareholders, getShareholderInvestmentSummary, getShareBlocks, getBankCapital,
+  searchTransfersAdvanced,
 } from '../services/api';
 import { formatCurrency, transferTypes } from '../utils/format';
+import AdvancedSearchPanel from '../components/AdvancedSearchPanel';
+
+const TRF_FIELDS = [
+  { key: 'id',                 label: 'Transfer ID',         type: 'int' },
+  { key: 'batch_no',           label: 'Batch No',            type: 'string' },
+  { key: 'transferor_id',      label: 'Transferor (Sh. ID)', type: 'int' },
+  { key: 'transferee_id',      label: 'Transferee (Sh. ID)', type: 'int' },
+  { key: 'transfer_type',      label: 'Transfer Type',       type: 'enum', options: transferTypes },
+  { key: 'number_of_shares',   label: 'Number of Shares',    type: 'int' },
+  { key: 'par_value',          label: 'Par Value',           type: 'number' },
+  { key: 'transfer_amount',    label: 'Transfer Amount',     type: 'number' },
+  { key: 'capital_gain_tax',   label: 'Capital Gain Tax',    type: 'number' },
+  { key: 'service_fee',        label: 'Service Fee',         type: 'number' },
+  { key: 'stamp_duty',         label: 'Stamp Duty',          type: 'number' },
+  { key: 'vat',                label: 'VAT',                 type: 'number' },
+  { key: 'total_fees',         label: 'Total Fees',          type: 'number' },
+  { key: 'is_full_transfer',   label: 'Full Transfer',       type: 'bool' },
+  { key: 'include_subscribed', label: 'Include Subscribed',  type: 'bool' },
+  { key: 'reason',             label: 'Reason',              type: 'string' },
+  { key: 'status',             label: 'Status',              type: 'enum', options: [{value:'pending',label:'Pending'},{value:'completed',label:'Completed'}] },
+  { key: 'approval_status',    label: 'Approval Status',     type: 'enum', options: [{value:'pending',label:'Pending'},{value:'approved',label:'Approved'},{value:'rejected',label:'Rejected'}] },
+  { key: 'transfer_date',      label: 'Transfer Date',       type: 'date' },
+  { key: 'created_at',         label: 'Created Date',        type: 'date' },
+];
 
 const { Title, Text } = Typography;
 
@@ -67,7 +92,10 @@ export default function Transfers() {
     }).catch(() => {});
   }, []);
 
-  const fetchData = async () => {
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [activeFilters, setActiveFilters] = useState(null);
+
+  const fetchSimple = useCallback(async () => {
     setLoading(true);
     try {
       const res = await getTransfers({ page, page_size: 20, search, transfer_type: typeFilter, approval_status: statusFilter });
@@ -75,9 +103,31 @@ export default function Transfers() {
       setTotal(res.data.total || 0);
     } catch { message.error('Failed to load'); }
     setLoading(false);
-  };
+  }, [page, search, typeFilter, statusFilter]);
 
-  useEffect(() => { fetchData(); }, [page, search, typeFilter, statusFilter]);
+  const fetchAdvanced = useCallback(async (filters) => {
+    setLoading(true);
+    try {
+      const res = await searchTransfersAdvanced({ filters, page, page_size: 20 });
+      setData(res.data.data || []);
+      setTotal(res.data.total || 0);
+    } catch (err) { message.error(err.response?.data?.error || 'Search failed'); }
+    setLoading(false);
+  }, [page]);
+
+  useEffect(() => {
+    if (activeFilters) fetchAdvanced(activeFilters);
+    else fetchSimple();
+  }, [activeFilters, fetchAdvanced, fetchSimple]);
+
+  const runAdvancedSearch = (cleaned) => {
+    if (cleaned.length === 0) { message.warning('Add at least one filter.'); return; }
+    setPage(1);
+    setActiveFilters(cleaned);
+  };
+  const resetAdvancedSearch = () => { setActiveFilters(null); setPage(1); };
+
+  const fetchData = () => { if (activeFilters) fetchAdvanced(activeFilters); else fetchSimple(); };
 
   const handleShareholderSearch = async (val) => {
     if (!val || val.length < 1) return;
@@ -202,9 +252,25 @@ export default function Transfers() {
     const values = form.getFieldsValue();
     if (values.number_of_shares && values.par_value) {
       try {
+        // Pass the source lines so the backend can read each Allocation's
+        // cost basis (AllocatedAmount/AllocatedShares) and compute CGT on the
+        // actual capital gain, not on the gross transfer value.
+        const rawLines = values.lines || [];
+        const lines = rawLines
+          .filter(l => l?.from_allocation_id)
+          .map((line, idx) => {
+            const fkey = fieldKeysRef.current[idx];
+            const mode = (fkey != null ? lineModes[fkey] : null) || 'paid_only';
+            return {
+              from_allocation_id:        line.from_allocation_id,
+              paid_shares_to_transfer:   mode !== 'unpaid_only' ? (line.paid_shares_to_transfer  || 0) : 0,
+              unpaid_shares_to_transfer: mode !== 'paid_only'   ? (line.unpaid_shares_to_transfer || 0) : 0,
+            };
+          });
         const res = await calculateTransferFees({
           number_of_shares: values.number_of_shares,
           par_value: values.par_value,
+          lines,
         });
         setFees(res.data);
       } catch {}
@@ -259,6 +325,7 @@ export default function Transfers() {
   // Nested transfer history columns shown inside expanded allocation rows
   const allocTransferHistoryCols = [
     { title: 'Batch No', dataIndex: 'batch_no', width: 140 },
+    { title: 'To Sh. ID', key: 'toShid', width: 80, render: (_, r) => r.transferee_id ?? r.transferee?.id ?? '-' },
     { title: 'Transferee', key: 'to', render: (_, r) => r.transferee ? `${r.transferee.first_name} ${r.transferee.last_name}` : '-' },
     { title: 'Shares', dataIndex: 'number_of_shares', width: 80 },
     { title: 'Amount', dataIndex: 'transfer_amount', render: v => formatCurrency(v) },
@@ -266,7 +333,12 @@ export default function Transfers() {
     { title: 'Div. Cutoff', dataIndex: 'agreed_dividend_date', width: 105, render: d => d ? dayjs(d).format('YYYY-MM-DD') : <Text type="secondary">—</Text> },
     {
       title: 'Status', dataIndex: 'approval_status', width: 85,
-      render: s => <Tag color={s === 'approved' ? 'green' : s === 'rejected' ? 'red' : 'orange'}>{s}</Tag>,
+      render: (s, r) => {
+        const tag = <Tag color={s === 'approved' ? 'green' : s === 'rejected' ? 'red' : 'orange'}>{s}</Tag>;
+        return s === 'rejected' && r.rejection_reason
+          ? <Tooltip title={r.rejection_reason} placement="left">{tag}</Tooltip>
+          : tag;
+      },
     },
   ];
 
@@ -359,13 +431,22 @@ export default function Transfers() {
     },
     {
       title: 'Status', dataIndex: 'approval_status', width: 85,
-      render: s => <Tag color={s === 'approved' ? 'red' : 'orange'}>{s}</Tag>,
+      render: (s, r) => {
+        // Previously hardcoded 'red' for approved which was a bug — using
+        // standard color scheme (green/red/orange) matching the other tables.
+        const tag = <Tag color={s === 'approved' ? 'green' : s === 'rejected' ? 'red' : 'orange'}>{s}</Tag>;
+        return s === 'rejected' && r.rejection_reason
+          ? <Tooltip title={r.rejection_reason} placement="left">{tag}</Tooltip>
+          : tag;
+      },
     },
   ];
 
   const columns = [
     { title: 'Batch No', dataIndex: 'batch_no', width: 150 },
+    { title: 'From Sh. ID', key: 'fromShid', width: 90, render: (_, r) => r.transferor_id ?? r.transferor?.id ?? '-' },
     { title: 'Transferor', key: 'from', render: (_, r) => r.transferor ? `${r.transferor.first_name} ${r.transferor.last_name}` : '-' },
+    { title: 'To Sh. ID', key: 'toShid', width: 80, render: (_, r) => r.transferee_id ?? r.transferee?.id ?? '-' },
     { title: 'Transferee', key: 'to', render: (_, r) => r.transferee ? `${r.transferee.first_name} ${r.transferee.last_name}` : '-' },
     { title: 'Type', dataIndex: 'transfer_type', render: t => <Tag>{t}</Tag> },
     { title: 'Shares', dataIndex: 'number_of_shares', width: 80 },
@@ -374,7 +455,12 @@ export default function Transfers() {
     { title: 'Date', dataIndex: 'transfer_date', width: 105, render: d => d ? dayjs(d).format('YYYY-MM-DD') : '-' },
     {
       title: 'Status', dataIndex: 'approval_status', width: 90,
-      render: s => <Tag color={s === 'approved' ? 'green' : s === 'rejected' ? 'red' : 'orange'}>{s}</Tag>,
+      render: (s, r) => {
+        const tag = <Tag color={s === 'approved' ? 'green' : s === 'rejected' ? 'red' : 'orange'}>{s}</Tag>;
+        return s === 'rejected' && r.rejection_reason
+          ? <Tooltip title={r.rejection_reason} placement="left">{tag}</Tooltip>
+          : tag;
+      },
     },
   ];
 
@@ -404,12 +490,13 @@ export default function Transfers() {
       </Row>
 
       {/* Search & Filter bar */}
-      <Row gutter={16} style={{ marginBottom: 16 }}>
+      <Row gutter={16} style={{ marginBottom: 16 }} align="middle">
         <Col span={9}>
           <Input.Search
             placeholder="Search by transferor, transferee name, account or batch no..."
             prefix={<SearchOutlined />}
             allowClear
+            disabled={!!activeFilters}
             onSearch={(v) => { setSearch(v); setPage(1); }}
           />
         </Col>
@@ -419,6 +506,7 @@ export default function Transfers() {
             allowClear
             style={{ width: '100%' }}
             options={transferTypes}
+            disabled={!!activeFilters}
             onChange={(v) => { setTypeFilter(v || ''); setPage(1); }}
           />
         </Col>
@@ -427,6 +515,7 @@ export default function Transfers() {
             placeholder="Approval status"
             allowClear
             style={{ width: '100%' }}
+            disabled={!!activeFilters}
             options={[
               { value: 'pending', label: 'Pending' },
               { value: 'approved', label: 'Approved' },
@@ -435,7 +524,28 @@ export default function Transfers() {
             onChange={(v) => { setStatusFilter(v || ''); setPage(1); }}
           />
         </Col>
+        <Col span={5}>
+          <Button
+            icon={<FilterOutlined />}
+            type={advancedOpen ? 'primary' : 'default'}
+            onClick={() => setAdvancedOpen(o => !o)}
+          >
+            {advancedOpen ? 'Hide Advanced Search' : 'Advanced Search'}
+          </Button>
+          {activeFilters && (
+            <Tag color="blue" closable onClose={resetAdvancedSearch} style={{ marginLeft: 8 }}>
+              {activeFilters.length} filter{activeFilters.length === 1 ? '' : 's'} applied
+            </Tag>
+          )}
+        </Col>
       </Row>
+
+      <AdvancedSearchPanel
+        fields={TRF_FIELDS}
+        open={advancedOpen}
+        onSearch={runAdvancedSearch}
+        onReset={resetAdvancedSearch}
+      />
 
       <Table dataSource={data} columns={columns} rowKey="id" loading={loading} size="small"
         pagination={{ current: page, total, pageSize: 20, onChange: setPage, showTotal: t => `Total ${t}` }}
@@ -871,8 +981,18 @@ export default function Transfers() {
               </Form.Item>
             </Col>
             <Col span={8}>
-              <Form.Item name="par_value" label="Par Value (from settings)" tooltip="Auto-set from bank capital settings">
-                <InputNumber style={{ width: '100%' }} disabled />
+              <Form.Item
+                name="par_value"
+                label="Selling Price / Share"
+                tooltip={`Defaults to the company par value (ETB ${parValue}). For Sale transfers, enter the agreed price per share — any amount above the cost basis becomes capital gain.`}
+                extra={`Company par: ETB ${parValue}`}
+              >
+                <InputNumber
+                  style={{ width: '100%' }}
+                  min={0}
+                  step={1}
+                  onChange={() => handleCalcFees()}
+                />
               </Form.Item>
             </Col>
             <Col span={8}>
@@ -910,6 +1030,20 @@ export default function Transfers() {
           {/* Fee calculation result */}
           {fees && (
             <Card size="small" title="Calculated Transfer Fees" style={{ marginBottom: 16, borderColor: '#faad14' }}>
+              {/* Capital-gain math, shown above the fee grid for transparency */}
+              <div style={{ background: '#fafafa', padding: '8px 10px', borderRadius: 4, marginBottom: 12, fontSize: 12 }}>
+                <Text type="secondary">CGT = {fees.capital_gain_tax_rate}% × (selling − cost basis) × shares.</Text>
+                <div style={{ marginTop: 4, fontFamily: 'monospace' }}>
+                  Selling/share: <Text strong>{formatCurrency(fees.selling_price_per_share)}</Text> {' − '}
+                  Cost basis/share: <Text strong>{formatCurrency(fees.cost_basis_per_share)}</Text> {' = '}
+                  Gain/share: <Text strong style={{ color: fees.gain_per_share > 0 ? '#cf1322' : '#3f8600' }}>
+                    {formatCurrency(fees.gain_per_share)}
+                  </Text>
+                  {' · '}
+                  Capital gain: <Text strong>{formatCurrency(fees.capital_gain)}</Text>
+                </div>
+              </div>
+
               <Row gutter={16}>
                 <Col span={8}>
                   <Text type="secondary" style={{ fontSize: 11 }}>TRANSFER VALUE</Text>
@@ -920,11 +1054,17 @@ export default function Transfers() {
                   <div><Text strong>{formatCurrency(fees.capital_gain_tax)}</Text></div>
                 </Col>
                 <Col span={8}>
-                  <Text type="secondary" style={{ fontSize: 11 }}>SERVICE FEE ({fees.service_fee_rate}%)</Text>
+                  <Text type="secondary" style={{ fontSize: 11 }}>
+                    SERVICE FEE ({fees.service_fee_rate}%)
+                    {fees.service_fee_floor_applied && <Tag color="orange" style={{ marginLeft: 4, fontSize: 10 }}>min applied</Tag>}
+                    {fees.service_fee_cap_applied && <Tag color="orange" style={{ marginLeft: 4, fontSize: 10 }}>capped</Tag>}
+                  </Text>
                   <div><Text strong>{formatCurrency(fees.service_fee)}</Text></div>
                 </Col>
                 <Col span={8} style={{ marginTop: 8 }}>
-                  <Text type="secondary" style={{ fontSize: 11 }}>STAMP DUTY ({fees.stamp_duty_rate}%)</Text>
+                  <Text type="secondary" style={{ fontSize: 11 }}>
+                    STAMP DUTY {fees.stamp_duty_type === 'fixed' ? '(fixed)' : `(${fees.stamp_duty_rate}%)`}
+                  </Text>
                   <div><Text strong>{formatCurrency(fees.stamp_duty)}</Text></div>
                 </Col>
                 <Col span={8} style={{ marginTop: 8 }}>

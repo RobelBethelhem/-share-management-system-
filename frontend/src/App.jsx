@@ -8,6 +8,9 @@ import Shareholders from './pages/Shareholders';
 import ShareholderDetail from './pages/ShareholderDetail';
 import Subscriptions from './pages/Subscriptions';
 import Allocations from './pages/Allocations';
+import CapitalIncreases from './pages/CapitalIncreases';
+import CapitalIncreaseDetail from './pages/CapitalIncreaseDetail';
+import CIAdditionalRequests from './pages/CIAdditionalRequests';
 import Investments from './pages/Investments';
 import Transfers from './pages/Transfers';
 import Dividends from './pages/Dividends';
@@ -48,6 +51,9 @@ function App() {
               <Route path="shareholders/:id" element={<ShareholderDetail />} />
               <Route path="subscriptions" element={<Subscriptions />} />
               <Route path="allocations" element={<Allocations />} />
+              <Route path="capital-increases" element={<CapitalIncreases />} />
+              <Route path="capital-increases/:id" element={<CapitalIncreaseDetail />} />
+              <Route path="capital-increase-additional" element={<CIAdditionalRequests />} />
               <Route path="investments" element={<Investments />} />
               <Route path="transfers" element={<Transfers />} />
               <Route path="dividends" element={<Dividends />} />

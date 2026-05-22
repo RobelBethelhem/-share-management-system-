@@ -1,11 +1,27 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Table, Button, Modal, Form, InputNumber, Select, Input, Space, Tag, message, Alert, Typography, Row, Col } from 'antd';
-import { PlusOutlined, SearchOutlined } from '@ant-design/icons';
+import { PlusOutlined, SearchOutlined, FilterOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { getAllocations, allocateFromSubscriptions } from '../services/api';
+import { getAllocations, allocateFromSubscriptions, searchAllocationsAdvanced } from '../services/api';
 import { formatCurrency } from '../utils/format';
+import AdvancedSearchPanel from '../components/AdvancedSearchPanel';
 
 const { Title } = Typography;
+
+const ALLOC_FIELDS = [
+  { key: 'id',                  label: 'Allocation ID',       type: 'int' },
+  { key: 'shareholder_id',      label: 'Shareholder ID',      type: 'int' },
+  { key: 'subscription_id',     label: 'Subscription ID',     type: 'int' },
+  { key: 'capital_increase_id', label: 'Capital Increase ID', type: 'int' },
+  { key: 'allocation_no',       label: 'Allocation No',       type: 'string' },
+  { key: 'round',               label: 'Round',               type: 'int' },
+  { key: 'allocated_shares',    label: 'Allocated Shares',    type: 'int' },
+  { key: 'allocated_amount',    label: 'Allocated Amount',    type: 'number' },
+  { key: 'status',              label: 'Status',              type: 'enum', options: [{value:'pending',label:'Pending'},{value:'allocated',label:'Allocated'},{value:'cancelled',label:'Cancelled'}] },
+  { key: 'approval_status',     label: 'Approval Status',     type: 'enum', options: [{value:'pending',label:'Pending'},{value:'approved',label:'Approved'},{value:'rejected',label:'Rejected'}] },
+  { key: 'allocation_date',     label: 'Allocation Date',     type: 'date' },
+  { key: 'created_at',          label: 'Created Date',        type: 'date' },
+];
 
 export default function Allocations() {
   const [data, setData] = useState([]);
@@ -18,7 +34,10 @@ export default function Allocations() {
   const [modalOpen, setModalOpen] = useState(false);
   const [form] = Form.useForm();
 
-  const fetchData = async () => {
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [activeFilters, setActiveFilters] = useState(null);
+
+  const fetchSimple = useCallback(async () => {
     setLoading(true);
     try {
       const res = await getAllocations({ page, page_size: 20, search, round: roundFilter, status: statusFilter });
@@ -26,9 +45,31 @@ export default function Allocations() {
       setTotal(res.data.total || 0);
     } catch { message.error('Failed to load'); }
     setLoading(false);
-  };
+  }, [page, search, roundFilter, statusFilter]);
 
-  useEffect(() => { fetchData(); }, [page, search, roundFilter, statusFilter]);
+  const fetchAdvanced = useCallback(async (filters) => {
+    setLoading(true);
+    try {
+      const res = await searchAllocationsAdvanced({ filters, page, page_size: 20 });
+      setData(res.data.data || []);
+      setTotal(res.data.total || 0);
+    } catch (err) { message.error(err.response?.data?.error || 'Search failed'); }
+    setLoading(false);
+  }, [page]);
+
+  useEffect(() => {
+    if (activeFilters) fetchAdvanced(activeFilters);
+    else fetchSimple();
+  }, [activeFilters, fetchAdvanced, fetchSimple]);
+
+  const runAdvancedSearch = (cleaned) => {
+    if (cleaned.length === 0) { message.warning('Add at least one filter.'); return; }
+    setPage(1);
+    setActiveFilters(cleaned);
+  };
+  const resetAdvancedSearch = () => { setActiveFilters(null); setPage(1); };
+
+  const fetchData = () => { if (activeFilters) fetchAdvanced(activeFilters); else fetchSimple(); };
 
   const handleAllocate = async (values) => {
     try {
@@ -60,6 +101,7 @@ export default function Allocations() {
 
   const columns = [
     { title: 'Allocation No', dataIndex: 'allocation_no', width: 140 },
+    { title: 'Sh. ID', key: 'shid', width: 75, render: (_, r) => r.shareholder_id ?? r.shareholder?.id ?? '-' },
     { title: 'Shareholder', key: 'sh', render: (_, r) => r.shareholder ? `${r.shareholder.first_name} ${r.shareholder.last_name}` : '-' },
     { title: 'Round', dataIndex: 'round', width: 80 },
     { title: 'Shares', dataIndex: 'allocated_shares' },
@@ -77,12 +119,13 @@ export default function Allocations() {
         </Button>
       </Row>
 
-      <Row gutter={16} style={{ marginBottom: 16 }}>
+      <Row gutter={16} style={{ marginBottom: 16 }} align="middle">
         <Col span={8}>
           <Input.Search
             placeholder="Search by shareholder name or account..."
             prefix={<SearchOutlined />}
             allowClear
+            disabled={!!activeFilters}
             onSearch={(v) => { setSearch(v); setPage(1); }}
           />
         </Col>
@@ -91,6 +134,7 @@ export default function Allocations() {
             placeholder="Filter by round"
             allowClear
             style={{ width: '100%' }}
+            disabled={!!activeFilters}
             options={[1, 2, 3, 4, 5].map(r => ({ value: String(r), label: `Round ${r}` }))}
             onChange={(v) => { setRoundFilter(v || ''); setPage(1); }}
           />
@@ -100,6 +144,7 @@ export default function Allocations() {
             placeholder="Filter by status"
             allowClear
             style={{ width: '100%' }}
+            disabled={!!activeFilters}
             options={[
               { value: 'allocated', label: 'Allocated' },
               { value: 'pending', label: 'Pending' },
@@ -108,7 +153,28 @@ export default function Allocations() {
             onChange={(v) => { setStatusFilter(v || ''); setPage(1); }}
           />
         </Col>
+        <Col span={6}>
+          <Button
+            icon={<FilterOutlined />}
+            type={advancedOpen ? 'primary' : 'default'}
+            onClick={() => setAdvancedOpen(o => !o)}
+          >
+            {advancedOpen ? 'Hide Advanced Search' : 'Advanced Search'}
+          </Button>
+          {activeFilters && (
+            <Tag color="blue" closable onClose={resetAdvancedSearch} style={{ marginLeft: 8 }}>
+              {activeFilters.length} filter{activeFilters.length === 1 ? '' : 's'} applied
+            </Tag>
+          )}
+        </Col>
       </Row>
+
+      <AdvancedSearchPanel
+        fields={ALLOC_FIELDS}
+        open={advancedOpen}
+        onSearch={runAdvancedSearch}
+        onReset={resetAdvancedSearch}
+      />
 
       <Table dataSource={data} columns={columns} rowKey="id" loading={loading} size="small"
         pagination={{ current: page, total, pageSize: 20, onChange: setPage, showTotal: (t) => `Total ${t}` }}

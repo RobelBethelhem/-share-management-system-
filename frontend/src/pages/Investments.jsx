@@ -1,19 +1,20 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Table, Button, Modal, Form, Input, Select, DatePicker, InputNumber,
   Space, Tag, message, Typography, Row, Col, Switch, Tooltip, Card, Descriptions, Spin, Divider,
 } from 'antd';
 import {
-  PlusOutlined, SearchOutlined,
+  PlusOutlined, SearchOutlined, FilterOutlined,
   CheckCircleOutlined, ClockCircleOutlined, MinusCircleOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import {
   getInvestments, createInvestment, searchShareholders, getShareholders,
-  getShareholderInvestmentSummary, getBankCapital,
+  getShareholderInvestmentSummary, getBankCapital, searchInvestmentsAdvanced,
 } from '../services/api';
 import { formatCurrency, paymentMethods } from '../utils/format';
 import { formatEthiopianDate } from '../utils/ethiopianDate';
+import AdvancedSearchPanel from '../components/AdvancedSearchPanel';
 
 const { Title, Text } = Typography;
 
@@ -24,6 +25,28 @@ const statusIcons = {
   partially_paid: <ClockCircleOutlined />,
   not_started: <MinusCircleOutlined />,
 };
+
+// Advanced search whitelist — mirrors backend's investmentFieldType
+const INV_FIELDS = [
+  { key: 'id',                 label: 'Investment ID',     type: 'int' },
+  { key: 'shareholder_id',     label: 'Shareholder ID',    type: 'int' },
+  { key: 'allocation_id',      label: 'Allocation ID',     type: 'int' },
+  { key: 'payment_method',     label: 'Payment Method',    type: 'enum', options: paymentMethods },
+  { key: 'from_account',       label: 'From Account',      type: 'string' },
+  { key: 'reference_no',       label: 'Reference No',      type: 'string' },
+  { key: 'amount',             label: 'Amount (ETB)',      type: 'number' },
+  { key: 'number_of_shares',   label: 'Number of Shares',  type: 'int' },
+  { key: 'par_value',          label: 'Par Value',         type: 'number' },
+  { key: 'premium_value',      label: 'Premium Value',     type: 'number' },
+  { key: 'is_standing',        label: 'Standing Instr.',   type: 'bool' },
+  { key: 'standing_frequency', label: 'Frequency',         type: 'enum', options: [{value:'monthly',label:'Monthly'},{value:'quarterly',label:'Quarterly'}] },
+  { key: 'status',             label: 'Status',            type: 'enum', options: [{value:'active',label:'Active'},{value:'reversed',label:'Reversed'}] },
+  { key: 'approval_status',    label: 'Approval Status',   type: 'enum', options: [{value:'pending',label:'Pending'},{value:'approved',label:'Approved'},{value:'rejected',label:'Rejected'}] },
+  { key: 'remark',             label: 'Remark',            type: 'string' },
+  { key: 'payment_date',       label: 'Payment Date',      type: 'date' },
+  { key: 'amharic_date',       label: 'Ethiopian Date',    type: 'string' },
+  { key: 'created_at',         label: 'Created Date',      type: 'date' },
+];
 
 export default function Investments() {
   const [data, setData] = useState([]);
@@ -48,7 +71,11 @@ export default function Investments() {
     }).catch(() => {});
   }, []);
 
-  const fetchData = async () => {
+  // Advanced search state
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [activeFilters, setActiveFilters] = useState(null);
+
+  const fetchSimple = useCallback(async () => {
     setLoading(true);
     try {
       const res = await getInvestments({ page, page_size: 20, search, payment_method: methodFilter, approval_status: statusFilter });
@@ -56,9 +83,32 @@ export default function Investments() {
       setTotal(res.data.total || 0);
     } catch { message.error('Failed to load'); }
     setLoading(false);
-  };
+  }, [page, search, methodFilter, statusFilter]);
 
-  useEffect(() => { fetchData(); }, [page, search, methodFilter, statusFilter]);
+  const fetchAdvanced = useCallback(async (filters) => {
+    setLoading(true);
+    try {
+      const res = await searchInvestmentsAdvanced({ filters, page, page_size: 20 });
+      setData(res.data.data || []);
+      setTotal(res.data.total || 0);
+    } catch (err) { message.error(err.response?.data?.error || 'Search failed'); }
+    setLoading(false);
+  }, [page]);
+
+  useEffect(() => {
+    if (activeFilters) fetchAdvanced(activeFilters);
+    else fetchSimple();
+  }, [activeFilters, fetchAdvanced, fetchSimple]);
+
+  const runAdvancedSearch = (cleaned) => {
+    if (cleaned.length === 0) { message.warning('Add at least one filter.'); return; }
+    setPage(1);
+    setActiveFilters(cleaned);
+  };
+  const resetAdvancedSearch = () => { setActiveFilters(null); setPage(1); };
+
+  // alias kept so existing handlers (created on submit, etc.) still work
+  const fetchData = () => { if (activeFilters) fetchAdvanced(activeFilters); else fetchSimple(); };
 
   const handleShareholderSearch = async (val) => {
     if (!val || val.length < 1) return;
@@ -196,6 +246,7 @@ export default function Investments() {
 
   const columns = [
     { title: 'ID', dataIndex: 'id', width: 55 },
+    { title: 'Sh. ID', key: 'shid', width: 75, render: (_, r) => r.shareholder_id ?? r.shareholder?.id ?? '-' },
     {
       title: 'Shareholder', key: 'sh',
       render: (_, r) => r.shareholder ? `${r.shareholder.account_no} - ${r.shareholder.first_name} ${r.shareholder.last_name}` : '-',
@@ -220,7 +271,13 @@ export default function Investments() {
     { title: 'Ref No', dataIndex: 'reference_no', width: 110, render: (v) => v || '-' },
     {
       title: 'Approval', dataIndex: 'approval_status', width: 95,
-      render: (s) => <Tag color={s === 'approved' ? 'green' : 'orange'}>{s}</Tag>,
+      render: (s, r) => {
+        const color = s === 'approved' ? 'green' : s === 'rejected' ? 'red' : 'orange';
+        const tag = <Tag color={color}>{s}</Tag>;
+        return s === 'rejected' && r.rejection_reason
+          ? <Tooltip title={r.rejection_reason} placement="left">{tag}</Tooltip>
+          : tag;
+      },
     },
   ];
 
@@ -232,12 +289,13 @@ export default function Investments() {
       </Row>
 
       {/* Search & Filter bar */}
-      <Row gutter={16} style={{ marginBottom: 16 }}>
+      <Row gutter={16} style={{ marginBottom: 16 }} align="middle">
         <Col span={8}>
           <Input.Search
             placeholder="Search by shareholder name or account..."
             prefix={<SearchOutlined />}
             allowClear
+            disabled={!!activeFilters}
             onSearch={(v) => { setSearch(v); setPage(1); }}
           />
         </Col>
@@ -247,6 +305,7 @@ export default function Investments() {
             allowClear
             style={{ width: '100%' }}
             options={paymentMethods}
+            disabled={!!activeFilters}
             onChange={(v) => { setMethodFilter(v || ''); setPage(1); }}
           />
         </Col>
@@ -260,10 +319,32 @@ export default function Investments() {
               { value: 'approved', label: 'Approved' },
               { value: 'rejected', label: 'Rejected' },
             ]}
+            disabled={!!activeFilters}
             onChange={(v) => { setStatusFilter(v || ''); setPage(1); }}
           />
         </Col>
+        <Col span={6}>
+          <Button
+            icon={<FilterOutlined />}
+            type={advancedOpen ? 'primary' : 'default'}
+            onClick={() => setAdvancedOpen(o => !o)}
+          >
+            {advancedOpen ? 'Hide Advanced Search' : 'Advanced Search'}
+          </Button>
+          {activeFilters && (
+            <Tag color="blue" closable onClose={resetAdvancedSearch} style={{ marginLeft: 8 }}>
+              {activeFilters.length} filter{activeFilters.length === 1 ? '' : 's'} applied
+            </Tag>
+          )}
+        </Col>
       </Row>
+
+      <AdvancedSearchPanel
+        fields={INV_FIELDS}
+        open={advancedOpen}
+        onSearch={runAdvancedSearch}
+        onReset={resetAdvancedSearch}
+      />
 
       <Table dataSource={data} columns={columns} rowKey="id" loading={loading} size="small"
         pagination={{ current: page, total, pageSize: 20, onChange: setPage, showTotal: (t) => `Total ${t}` }}

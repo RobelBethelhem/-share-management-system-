@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"time"
 
@@ -238,46 +240,230 @@ func TransferReport(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": entries, "total": len(entries)})
 }
 
+// DividendReport returns a comprehensive dividend report with three lenses:
+//
+//  1. data:        flat per-dividend rows with the full breakdown
+//                  (gross, tax, net, reinvested, collected, uncollected,
+//                  transferred-to, blocked, status).
+//  2. by_shareholder: cross-fiscal-year accumulation per shareholder for the
+//                  "Accumulated (accrual from dividend)" view — shows who is
+//                  carrying how much unsettled across all fiscal years.
+//  3. totals:      grand totals for each component (collected, reinvested,
+//                  transferred, blocked, uncollected, plus gross/tax/net).
+//
+// Filters: fiscal_year (optional). When omitted, returns all fiscal years —
+// which is exactly what the accumulated view needs.
 func DividendReport(c *gin.Context) {
 	var dividends []models.Dividend
 	query := database.DB.Preload("Shareholder").Preload("DividendSetting")
 	if fiscalYear := c.Query("fiscal_year"); fiscalYear != "" {
 		query = query.Where("fiscal_year = ?", fiscalYear)
 	}
-	query.Order("id DESC").Find(&dividends)
+	query.Order("shareholder_id ASC, fiscal_year DESC").Find(&dividends)
 
-	var totalGross, totalTax, totalNet, totalCollected float64
+	type byShareholder struct {
+		ShareholderID    uint     `json:"shareholder_id"`
+		ShareholderName  string   `json:"shareholder_name"`
+		AccountNo        string   `json:"account_no"`
+		FiscalYears      []string `json:"fiscal_years"`
+		DividendCount    int      `json:"dividend_count"`
+		TotalGross       float64  `json:"total_gross"`
+		TotalTax         float64  `json:"total_tax"`
+		TotalNet         float64  `json:"total_net"`
+		TotalReinvested  float64  `json:"total_reinvested"`
+		TotalCollected   float64  `json:"total_collected"`
+		TotalTransferred float64  `json:"total_transferred"`
+		TotalBlocked     float64  `json:"total_blocked"`
+		TotalUncollected float64  `json:"total_uncollected"`
+	}
+	bsMap := map[uint]*byShareholder{}
+	seenFY := map[uint]map[string]bool{}
+
+	var totalGross, totalTax, totalNet float64
+	var totalReinvested, totalCollected, totalTransferred, totalBlocked, totalUncollected float64
+
 	for _, d := range dividends {
 		totalGross += d.GrossDividend
 		totalTax += d.TaxAmount
 		totalNet += d.NetDividend
+		totalReinvested += d.ReinvestedAmount
 		totalCollected += d.CollectedAmount
+		if d.IsTransferred {
+			// Transferred dividends have their net amount handled outside the
+			// regular collected flow — treat the net as "transferred out" so it
+			// shows in the transferred bucket.
+			totalTransferred += d.NetDividend
+		}
+		if d.IsBlocked {
+			// Blocked dividends keep their uncollected amount in limbo.
+			totalBlocked += d.UncollectedAmount
+		}
+		totalUncollected += d.UncollectedAmount
+
+		bs, ok := bsMap[d.ShareholderID]
+		if !ok {
+			name := ""
+			account := ""
+			if d.Shareholder.ID > 0 {
+				name = fmt.Sprintf("%s %s", d.Shareholder.FirstName, d.Shareholder.LastName)
+				account = d.Shareholder.AccountNo
+			}
+			bs = &byShareholder{
+				ShareholderID:   d.ShareholderID,
+				ShareholderName: name,
+				AccountNo:       account,
+				FiscalYears:     []string{},
+			}
+			bsMap[d.ShareholderID] = bs
+			seenFY[d.ShareholderID] = map[string]bool{}
+		}
+		if d.FiscalYear != "" && !seenFY[d.ShareholderID][d.FiscalYear] {
+			bs.FiscalYears = append(bs.FiscalYears, d.FiscalYear)
+			seenFY[d.ShareholderID][d.FiscalYear] = true
+		}
+		bs.DividendCount++
+		bs.TotalGross += d.GrossDividend
+		bs.TotalTax += d.TaxAmount
+		bs.TotalNet += d.NetDividend
+		bs.TotalReinvested += d.ReinvestedAmount
+		bs.TotalCollected += d.CollectedAmount
+		if d.IsTransferred {
+			bs.TotalTransferred += d.NetDividend
+		}
+		if d.IsBlocked {
+			bs.TotalBlocked += d.UncollectedAmount
+		}
+		bs.TotalUncollected += d.UncollectedAmount
 	}
 
+	byShareholderList := make([]byShareholder, 0, len(bsMap))
+	for _, v := range bsMap {
+		byShareholderList = append(byShareholderList, *v)
+	}
+	// Sort by total uncollected DESC so the people who owe follow-up bubble up.
+	sort.Slice(byShareholderList, func(i, j int) bool {
+		return byShareholderList[i].TotalUncollected > byShareholderList[j].TotalUncollected
+	})
+
 	c.JSON(http.StatusOK, gin.H{
-		"data":            dividends,
-		"total":           len(dividends),
-		"total_gross":     totalGross,
-		"total_tax":       totalTax,
-		"total_net":       totalNet,
-		"total_collected": totalCollected,
+		"data":              dividends,
+		"by_shareholder":    byShareholderList,
+		"total":             len(dividends),
+		"total_gross":       totalGross,
+		"total_tax":         totalTax,
+		"total_net":         totalNet,
+		"total_reinvested":  totalReinvested,
+		"total_collected":   totalCollected,
+		"total_transferred": totalTransferred,
+		"total_blocked":     totalBlocked,
+		"total_uncollected": totalUncollected,
 	})
 }
 
+// DividendTaxReport is a comprehensive tax view. The key insight is that tax
+// is computed on the TAXABLE gross (gross − reinvested), not the raw gross,
+// because reinvested portions are not realised income (no tax). So the
+// effective rate (tax ÷ gross) differs from the bracket rate (tax ÷ taxable)
+// whenever a shareholder has reinvested any portion of their dividend.
+//
+// The endpoint surfaces:
+//   - per-row: gross, reinvested, taxable_gross, tax, net, collected, uncollected
+//   - per-shareholder: accumulated totals (one row per shareholder)
+//   - grand totals: all components
+//
+// Includes ALL dividends (not just tax_amount > 0) so the report also covers
+// dividends that became fully reinvested (tax = 0) — those are still
+// relevant: they prove no tax was owed because the gain was deferred.
 func DividendTaxReport(c *gin.Context) {
 	var dividends []models.Dividend
 	query := database.DB.Preload("Shareholder")
 	if fiscalYear := c.Query("fiscal_year"); fiscalYear != "" {
 		query = query.Where("fiscal_year = ?", fiscalYear)
 	}
-	query.Where("tax_amount > 0").Order("id DESC").Find(&dividends)
+	query.Order("shareholder_id ASC, fiscal_year DESC").Find(&dividends)
 
-	var totalTax float64
+	type byShareholder struct {
+		ShareholderID    uint     `json:"shareholder_id"`
+		ShareholderName  string   `json:"shareholder_name"`
+		AccountNo        string   `json:"account_no"`
+		FiscalYears      []string `json:"fiscal_years"`
+		DividendCount    int      `json:"dividend_count"`
+		TotalGross       float64  `json:"total_gross"`
+		TotalReinvested  float64  `json:"total_reinvested"`
+		TotalTaxable     float64  `json:"total_taxable_gross"`
+		TotalTax         float64  `json:"total_tax"`
+		TotalNet         float64  `json:"total_net"`
+		TotalCollected   float64  `json:"total_collected"`
+		TotalUncollected float64  `json:"total_uncollected"`
+	}
+	bsMap := map[uint]*byShareholder{}
+	seenFY := map[uint]map[string]bool{}
+
+	var totalGross, totalReinvested, totalTaxable, totalTax, totalNet, totalCollected, totalUncollected float64
 	for _, d := range dividends {
+		taxable := d.GrossDividend - d.ReinvestedAmount
+		if taxable < 0 {
+			taxable = 0
+		}
+		totalGross += d.GrossDividend
+		totalReinvested += d.ReinvestedAmount
+		totalTaxable += taxable
 		totalTax += d.TaxAmount
+		totalNet += d.NetDividend
+		totalCollected += d.CollectedAmount
+		totalUncollected += d.UncollectedAmount
+
+		bs, ok := bsMap[d.ShareholderID]
+		if !ok {
+			name := ""
+			account := ""
+			if d.Shareholder.ID > 0 {
+				name = fmt.Sprintf("%s %s", d.Shareholder.FirstName, d.Shareholder.LastName)
+				account = d.Shareholder.AccountNo
+			}
+			bs = &byShareholder{
+				ShareholderID:   d.ShareholderID,
+				ShareholderName: name,
+				AccountNo:       account,
+				FiscalYears:     []string{},
+			}
+			bsMap[d.ShareholderID] = bs
+			seenFY[d.ShareholderID] = map[string]bool{}
+		}
+		if d.FiscalYear != "" && !seenFY[d.ShareholderID][d.FiscalYear] {
+			bs.FiscalYears = append(bs.FiscalYears, d.FiscalYear)
+			seenFY[d.ShareholderID][d.FiscalYear] = true
+		}
+		bs.DividendCount++
+		bs.TotalGross += d.GrossDividend
+		bs.TotalReinvested += d.ReinvestedAmount
+		bs.TotalTaxable += taxable
+		bs.TotalTax += d.TaxAmount
+		bs.TotalNet += d.NetDividend
+		bs.TotalCollected += d.CollectedAmount
+		bs.TotalUncollected += d.UncollectedAmount
 	}
 
-	c.JSON(http.StatusOK, gin.H{"data": dividends, "total": len(dividends), "total_tax": totalTax})
+	byShareholderList := make([]byShareholder, 0, len(bsMap))
+	for _, v := range bsMap {
+		byShareholderList = append(byShareholderList, *v)
+	}
+	sort.Slice(byShareholderList, func(i, j int) bool {
+		return byShareholderList[i].TotalTax > byShareholderList[j].TotalTax
+	})
+
+	c.JSON(http.StatusOK, gin.H{
+		"data":                dividends,
+		"by_shareholder":      byShareholderList,
+		"total":               len(dividends),
+		"total_gross":         totalGross,
+		"total_reinvested":    totalReinvested,
+		"total_taxable_gross": totalTaxable,
+		"total_tax":           totalTax,
+		"total_net":           totalNet,
+		"total_collected":     totalCollected,
+		"total_uncollected":   totalUncollected,
+	})
 }
 
 // BlockReport returns share blocks with allocation and paid/unpaid split info.

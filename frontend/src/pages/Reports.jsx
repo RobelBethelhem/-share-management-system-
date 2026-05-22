@@ -1,6 +1,6 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import {
-  Table, Button, Card, Select, DatePicker, Space, Tag, Tabs,
+  Table, Button, Card, Select, DatePicker, Space, Tag, Tabs, Switch, Tooltip,
   message, Typography, Row, Col, Descriptions, Statistic, Divider, Empty,
 } from 'antd';
 import {
@@ -10,7 +10,7 @@ import {
 import dayjs from 'dayjs';
 import * as XLSX from 'xlsx';
 import { saveAs } from 'file-saver';
-import { getReport, getShareholderStatement, searchShareholders } from '../services/api';
+import { getReport, getShareholderStatement, searchShareholders, getDividendSettings } from '../services/api';
 import { formatCurrency, formatNumber } from '../utils/format';
 
 const { Title, Text } = Typography;
@@ -60,6 +60,18 @@ const reportGroups = [
 const dateFilterReports = ['investments', 'transfers', 'service-charges', 'daily-schedules'];
 const fiscalYearReports = ['dividends', 'dividend-tax'];
 
+// Shared style for section titles in the on-screen Individual Statement so
+// the headings (Investments / Dividends / Transfers / etc.) match the
+// printed PDF's "section-title" CSS — same blue, same underline, same size.
+const statementSectionTitleStyle = {
+  fontSize: 14,
+  fontWeight: 700,
+  color: '#1a3a5c',
+  borderBottom: '1px solid #1a3a5c',
+  paddingBottom: 4,
+  marginBottom: 8,
+};
+
 // Flatten for label lookup
 const allReportTypes = reportGroups.flatMap(g => g.options);
 
@@ -70,7 +82,82 @@ export default function Reports() {
   const [summary, setSummary] = useState({});
   const [dateRange, setDateRange] = useState(null);
   const [fiscalYear, setFiscalYear] = useState('');
+  // Fiscal-year options are populated from the real DividendSetting rows
+  // — not hardcoded — so the dropdown reflects what actually exists in the
+  // database (e.g. "2025/26" instead of an arbitrary "2025/2026").
+  const [fiscalYearOptions, setFiscalYearOptions] = useState([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    getDividendSettings().then(res => {
+      if (cancelled) return;
+      const seen = new Set();
+      const opts = [];
+      (res.data?.data || []).forEach(s => {
+        if (s.fiscal_year && !seen.has(s.fiscal_year)) {
+          seen.add(s.fiscal_year);
+          opts.push({ value: s.fiscal_year, label: s.fiscal_year });
+        }
+      });
+      setFiscalYearOptions(opts);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
   const [statementId, setStatementId] = useState(null);
+  // Default: only approved items appear in the statement (rejected investments,
+  // subscriptions, transfers, and allocations are excluded). Admin can flip
+  // the toggle to include rejected entries for diagnostic / audit purposes.
+  const [includeRejected, setIncludeRejected] = useState(false);
+  const [statementSubTab, setStatementSubTab] = useState('statement');
+
+  const filterApproved = (rows) =>
+    includeRejected
+      ? (rows || [])
+      : (rows || []).filter(r => r?.approval_status !== 'rejected');
+
+  // Build the share-certificate register from approved investments.
+  // Each investment row becomes one certificate tranche; ceri-no From/To
+  // are computed as a running cumulative range per shareholder.
+  const buildCertificateRegister = (stmt) => {
+    if (!stmt) return { rows: [], total_amount: 0, total_shares: 0 };
+    const sh = stmt.shareholder || {};
+    const approved = filterApproved(stmt.investments);
+    const sorted = [...approved].sort((a, b) => {
+      const da = a.payment_date ? dayjs(a.payment_date).valueOf() : 0;
+      const db = b.payment_date ? dayjs(b.payment_date).valueOf() : 0;
+      return da - db || (a.id || 0) - (b.id || 0);
+    });
+    const englishName = `${sh.first_name || ''} ${sh.middle_name || ''} ${sh.last_name || ''}`
+      .replace(/\s+/g, ' ').trim();
+    const amharicName = `${sh.first_name_am || ''} ${sh.middle_name_am || ''} ${sh.last_name_am || ''}`
+      .replace(/\s+/g, ' ').trim();
+    let cursor = 0;
+    const rows = sorted.map(inv => {
+      const shares = inv.number_of_shares || 0;
+      const fromNo = shares > 0 ? cursor + 1 : null;
+      const toNo = shares > 0 ? cursor + shares : null;
+      cursor += shares;
+      return {
+        key: inv.id,
+        sh_id: sh.id,
+        cert_no: '',          // manual / pending issuance
+        pad_no: '',
+        issuance_status: inv.approval_status === 'approved' ? 'Issued' : (inv.approval_status || ''),
+        from_no: fromNo,
+        to_no: toNo,
+        amharic_date: '',
+        date_of_registration: inv.payment_date,
+        english_name: englishName,
+        amharic_name: amharicName,
+        share_paid_up: inv.amount || 0,
+        share_amount: shares,
+      };
+    });
+    const total_amount = rows.reduce((s, r) => s + (r.share_paid_up || 0), 0);
+    const total_shares = rows.reduce((s, r) => s + (r.share_amount || 0), 0);
+    return { rows, total_amount, total_shares };
+  };
+
   const [statement, setStatement] = useState(null);
   const [shareholders, setShareholders] = useState([]);
   const [searchLoading, setSearchLoading] = useState(false);
@@ -169,10 +256,53 @@ export default function Reports() {
     message.success('Excel file exported');
   };
 
+  const exportCertificateRegisterToExcel = () => {
+    if (!statement) return;
+    const sh = statement.shareholder;
+    const reg = buildCertificateRegister(statement);
+    const headers = [
+      'SH-ID', 'Certificate No.', 'Pad No', 'Issuance Status',
+      'ceri-no From', 'ceri-no To', 'Amharic Date of Registration',
+      'Date of Registration', 'Name of the Shareholder',
+      'Amharic Name of the Shareholder', 'Share Paid-up', 'Share Amount',
+    ];
+    const dataRows = reg.rows.map(r => [
+      r.sh_id, r.cert_no, r.pad_no, r.issuance_status,
+      r.from_no, r.to_no, r.amharic_date,
+      r.date_of_registration ? dayjs(r.date_of_registration).format('D-MMM-YY') : '',
+      r.english_name, r.amharic_name, r.share_paid_up, r.share_amount,
+    ]);
+    const totalRow = [
+      '', '', `Total Paid up As of ${dayjs().format('MMM DD/YYYY')}`, '',
+      '', '', '', '', '', '', reg.total_amount, reg.total_shares,
+    ];
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.aoa_to_sheet([
+      [`ZEMEN BANK S.C. - Share Certificate Register`],
+      [`Shareholder: ${sh?.first_name || ''} ${sh?.middle_name || ''} ${sh?.last_name || ''}`],
+      [`Account No: ${sh?.account_no || ''}`],
+      [],
+      headers, ...dataRows, totalRow,
+    ]);
+    XLSX.utils.book_append_sheet(wb, ws, 'Certificate Register');
+    const buf = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+    saveAs(new Blob([buf], { type: 'application/octet-stream' }),
+      `certificate-register-${sh?.account_no}-${dayjs().format('YYYY-MM-DD')}.xlsx`);
+    message.success('Certificate register exported');
+  };
+
   const exportStatementToExcel = () => {
     if (!statement) return;
+    if (statementSubTab === 'certificate') {
+      exportCertificateRegisterToExcel();
+      return;
+    }
     const wb = XLSX.utils.book_new();
     const sh = statement.shareholder;
+    const exportInvestments = filterApproved(statement.investments);
+    const exportSubscriptions = filterApproved(statement.subscriptions);
+    const exportAllocations = filterApproved(statement.allocations);
+    const exportTransfers = filterApproved(statement.transfers);
     // Summary sheet
     const summaryData = [
       ['ZEMEN BANK S.C. - Shareholder Statement'],
@@ -188,9 +318,9 @@ export default function Reports() {
     XLSX.utils.book_append_sheet(wb, ws1, 'Summary');
 
     // Investments sheet
-    if (statement.investments?.length) {
+    if (exportInvestments.length) {
       const invHeaders = ['Date', 'Amount', 'Shares', 'Method', 'Reference', 'Status'];
-      const invRows = statement.investments.map(i => [
+      const invRows = exportInvestments.map(i => [
         i.payment_date ? dayjs(i.payment_date).format('YYYY-MM-DD') : '',
         i.amount, i.number_of_shares, i.payment_method, i.reference_no, i.status,
       ]);
@@ -210,9 +340,9 @@ export default function Reports() {
     }
 
     // Allocations sheet
-    if (statement.allocations?.length) {
+    if (exportAllocations.length) {
       const alHeaders = ['Alloc No', 'Round', 'Sub Type', 'Allocated', 'Paid', 'Unpaid', 'Paid Blocked', 'Unpaid Blocked', 'Available', 'Approval'];
-      const alRows = statement.allocations.map(a => [
+      const alRows = exportAllocations.map(a => [
         a.allocation_no, a.round, a.subscription_type,
         a.allocated_shares, a.paid_shares, a.unpaid_shares,
         a.paid_blocked, a.unpaid_blocked, a.available_shares, a.approval_status,
@@ -222,9 +352,9 @@ export default function Reports() {
     }
 
     // Transfers sheet
-    if (statement.transfers?.length) {
+    if (exportTransfers.length) {
       const trHeaders = ['Batch', 'Date', 'Total Shares', 'Paid', 'Unpaid', 'Amount', 'Type', 'Status', 'From Allocation(s)'];
-      const trRows = statement.transfers.map(t => {
+      const trRows = exportTransfers.map(t => {
         const paidTot = (t.lines || []).reduce((s, l) => s + (l.paid_shares_to_transfer || 0), 0);
         const unpaidTot = (t.lines || []).reduce((s, l) => s + (l.unpaid_shares_to_transfer || 0), 0);
         const fromAllocs = (t.lines || []).map(l => l.from_allocation?.allocation_no || l.from_allocation_id || '').filter(Boolean).join(', ');
@@ -258,7 +388,80 @@ export default function Reports() {
   };
 
   // Print report
+  const handlePrintCertificateRegister = () => {
+    if (!statement) return;
+    const sh = statement.shareholder;
+    const reg = buildCertificateRegister(statement);
+    const printWindow = window.open('', '_blank');
+    printWindow.document.write(`<!DOCTYPE html><html><head><title>Share Certificate Register</title>
+    <style>
+      body { font-family: 'Segoe UI', Arial, sans-serif; margin: 18px; color: #333; }
+      .header { text-align: center; border-bottom: 3px double #1a3a5c; padding-bottom: 12px; margin-bottom: 16px; }
+      .header h1 { color: #1a3a5c; margin: 0; font-size: 22px; }
+      .header h2 { color: #1a3a5c; margin: 2px 0; font-size: 14px; font-weight: normal; }
+      .header h3 { color: #333; margin: 8px 0 0; font-size: 16px; }
+      .meta { display: flex; justify-content: space-between; margin-bottom: 12px; font-size: 11px; color: #666; }
+      table { width: 100%; border-collapse: collapse; font-size: 10px; }
+      th { background: #f5a06b; color: #000; padding: 8px 5px; text-align: center; border: 1px solid #999; font-weight: bold; }
+      td { padding: 5px 4px; border: 1px solid #ccc; }
+      td.num { text-align: right; }
+      td.center { text-align: center; }
+      tr.total { background: #d9d9d9; font-weight: bold; }
+      .footer { margin-top: 20px; text-align: center; font-size: 10px; color: #999; border-top: 1px solid #ddd; padding-top: 8px; }
+      @media print { body { margin: 8px; } @page { size: A4 landscape; } }
+    </style></head><body>
+      <div class="header">
+        <h1>ZEMEN BANK S.C.</h1>
+        <h2>&#x12D8;&#x1218;&#x1295; &#x1263;&#x1295;&#x12AD; &#x12A0;.&#x121B;.</h2>
+        <h3>Share Certificate Register</h3>
+      </div>
+      <div class="meta">
+        <span>Account No: <b>${sh?.account_no || '—'}</b> &nbsp;&nbsp; Name: <b>${sh?.first_name || ''} ${sh?.middle_name || ''} ${sh?.last_name || ''}</b></span>
+        <span>Generated: ${dayjs().format('MMMM D, YYYY h:mm A')}</span>
+      </div>
+      <table>
+        <thead><tr>
+          <th>SH-ID</th><th>Certificate No.</th><th>Pad No</th><th>Issuance Status</th>
+          <th>ceri-no From</th><th>ceri-no To</th><th>Amharic Date of Registration</th>
+          <th>Data of Registration</th><th>Name of the Shareholder</th>
+          <th>Amharic Name of the Shareholder</th><th>Share Paid-up</th><th>Share Amount</th>
+        </tr></thead>
+        <tbody>`);
+    reg.rows.forEach(r => {
+      printWindow.document.write(`<tr>
+        <td class="center">${r.sh_id || ''}</td>
+        <td>${r.cert_no || ''}</td>
+        <td>${r.pad_no || ''}</td>
+        <td class="center">${r.issuance_status || ''}</td>
+        <td class="num">${r.from_no ? formatNumber(r.from_no) : ''}</td>
+        <td class="num">${r.to_no ? formatNumber(r.to_no) : ''}</td>
+        <td>${r.amharic_date || ''}</td>
+        <td>${r.date_of_registration ? dayjs(r.date_of_registration).format('D-MMM-YY') : ''}</td>
+        <td>${r.english_name || ''}</td>
+        <td>${r.amharic_name || ''}</td>
+        <td class="num">${formatCurrency(r.share_paid_up)}</td>
+        <td class="num">${formatNumber(r.share_amount)}</td>
+      </tr>`);
+    });
+    printWindow.document.write(`
+        <tr class="total">
+          <td colspan="3" class="center">Total Paid up As of ${dayjs().format('MMM DD/YYYY')}</td>
+          <td colspan="7"></td>
+          <td class="num">${formatCurrency(reg.total_amount)}</td>
+          <td class="num">${formatNumber(reg.total_shares)}</td>
+        </tr>
+        </tbody></table>
+        <div class="footer">System-generated. Certificate No, Pad No, ceri-no ranges, and Amharic dates may be edited by the secretariat after issuance.</div>
+        <script>window.onload = () => { window.print(); }</script>
+      </body></html>`);
+    printWindow.document.close();
+  };
+
   const handlePrint = () => {
+    if (statement && statementSubTab === 'certificate') {
+      handlePrintCertificateRegister();
+      return;
+    }
     if (!data.length && !statement) { message.warning('No data to print'); return; }
     const cols = statement ? null : getColumns();
     const label = allReportTypes.find(r => r.value === reportType)?.label || 'Report';
@@ -302,6 +505,10 @@ export default function Reports() {
     if (statement) {
       // Print individual statement
       const sh = statement.shareholder;
+      const printInvestments = filterApproved(statement.investments);
+      const printSubscriptions = filterApproved(statement.subscriptions);
+      const printAllocations = filterApproved(statement.allocations);
+      const printTransfers = filterApproved(statement.transfers);
       printWindow.document.write(`
         <div class="summary-box">
           <div class="item"><div class="label">Account No</div><div class="value">${sh?.account_no || '-'}</div></div>
@@ -309,21 +516,22 @@ export default function Reports() {
           <div class="item"><div class="label">Type</div><div class="value">${sh?.shareholder_type || '-'}</div></div>
           <div class="item"><div class="label">Total Shares</div><div class="value">${formatNumber(statement.total_shares)}</div></div>
           <div class="item"><div class="label">Total Invested</div><div class="value">${formatCurrency(statement.total_invested)}</div></div>
-          ${statement.allocations?.length > 0 ? (() => {
-            const tp = statement.allocations.reduce((s, a) => s + (a.paid_shares || 0), 0);
-            const tu = statement.allocations.reduce((s, a) => s + (a.unpaid_shares || 0), 0);
-            const tb = statement.allocations.reduce((s, a) => s + (a.paid_blocked || 0) + (a.unpaid_blocked || 0), 0);
+          ${printAllocations.length > 0 ? (() => {
+            const tp = printAllocations.reduce((s, a) => s + (a.paid_shares || 0), 0);
+            const tu = printAllocations.reduce((s, a) => s + (a.unpaid_shares || 0), 0);
+            const tb = printAllocations.reduce((s, a) => s + (a.paid_blocked || 0) + (a.unpaid_blocked || 0), 0);
             return `<div class="item"><div class="label">Paid Shares</div><div class="value">${formatNumber(tp)}</div></div>
             <div class="item"><div class="label">Unpaid Shares</div><div class="value">${formatNumber(tu)}</div></div>
             <div class="item"><div class="label">Total Blocked</div><div class="value">${formatNumber(tb)}</div></div>`;
           })() : ''}
+          ${!includeRejected ? '<div class="item" style="color:#999;font-size:10px;"><em>Approved entries only</em></div>' : '<div class="item" style="color:#cf1322;font-size:10px;"><em>Including rejected</em></div>'}
         </div>
       `);
 
       // Investments table
-      if (statement.investments?.length) {
-        printWindow.document.write(`<div class="section-title">Investments (${statement.investments.length})</div><table><tr><th>Date</th><th>Amount</th><th>Shares</th><th>Method</th><th>Reference</th></tr>`);
-        statement.investments.forEach(i => {
+      if (printInvestments.length) {
+        printWindow.document.write(`<div class="section-title">Investments (${printInvestments.length})</div><table><tr><th>Date</th><th>Amount</th><th>Shares</th><th>Method</th><th>Reference</th></tr>`);
+        printInvestments.forEach(i => {
           printWindow.document.write(`<tr><td>${i.payment_date ? dayjs(i.payment_date).format('YYYY-MM-DD') : '-'}</td><td>${formatCurrency(i.amount)}</td><td>${i.number_of_shares}</td><td>${i.payment_method}</td><td>${i.reference_no || '-'}</td></tr>`);
         });
         printWindow.document.write('</table>');
@@ -339,18 +547,18 @@ export default function Reports() {
       }
 
       // Allocations table
-      if (statement.allocations?.length) {
-        printWindow.document.write(`<div class="section-title">Allocations (${statement.allocations.length})</div><table><tr><th>Alloc No</th><th>Round</th><th>Type</th><th>Allocated</th><th>Paid</th><th>Unpaid</th><th>Paid Blocked</th><th>Unpaid Blocked</th><th>Available</th><th>Approval</th></tr>`);
-        statement.allocations.forEach(a => {
+      if (printAllocations.length) {
+        printWindow.document.write(`<div class="section-title">Allocations (${printAllocations.length})</div><table><tr><th>Alloc No</th><th>Round</th><th>Type</th><th>Allocated</th><th>Paid</th><th>Unpaid</th><th>Paid Blocked</th><th>Unpaid Blocked</th><th>Available</th><th>Approval</th></tr>`);
+        printAllocations.forEach(a => {
           printWindow.document.write(`<tr><td>${a.allocation_no}</td><td>${a.round || '-'}</td><td>${a.subscription_type || '-'}</td><td>${formatNumber(a.allocated_shares)}</td><td>${formatNumber(a.paid_shares)}</td><td>${formatNumber(a.unpaid_shares)}</td><td>${a.paid_blocked || 0}</td><td>${a.unpaid_blocked || 0}</td><td>${formatNumber(a.available_shares)}</td><td>${a.approval_status}</td></tr>`);
         });
         printWindow.document.write('</table>');
       }
 
       // Transfers table
-      if (statement.transfers?.length) {
-        printWindow.document.write(`<div class="section-title">Transfers (${statement.transfers.length})</div><table><tr><th>Batch</th><th>Date</th><th>Total Shares</th><th>Paid</th><th>Unpaid</th><th>Amount</th><th>Type</th><th>Status</th><th>From Allocation(s)</th></tr>`);
-        statement.transfers.forEach(t => {
+      if (printTransfers.length) {
+        printWindow.document.write(`<div class="section-title">Transfers (${printTransfers.length})</div><table><tr><th>Batch</th><th>Date</th><th>Total Shares</th><th>Paid</th><th>Unpaid</th><th>Amount</th><th>Type</th><th>Status</th><th>From Allocation(s)</th></tr>`);
+        printTransfers.forEach(t => {
           const paidTot = (t.lines || []).reduce((s, l) => s + (l.paid_shares_to_transfer || 0), 0);
           const unpaidTot = (t.lines || []).reduce((s, l) => s + (l.unpaid_shares_to_transfer || 0), 0);
           const fromAllocs = (t.lines || []).map(l => l.from_allocation?.allocation_no || '').filter(Boolean).join(', ') || '-';
@@ -479,29 +687,57 @@ export default function Reports() {
         ];
       case 'dividends':
         return [
+          { title: 'Sh. ID', key: 'shid', width: 70, render: (_, r) => r.shareholder_id ?? r.shareholder?.id ?? '-' },
           { title: 'Shareholder', key: 'sh', render: (_, r) => r.shareholder ? `${r.shareholder.first_name} ${r.shareholder.last_name}` : '-' },
+          { title: 'Account', key: 'acc', render: (_, r) => r.shareholder?.account_no || '-' },
           { title: 'Fiscal Year', dataIndex: 'fiscal_year' },
-          { title: 'W.Avg Shares', dataIndex: 'weighted_avg_shares', render: (v) => v?.toFixed(2) },
           { title: 'Gross', dataIndex: 'gross_dividend', render: (v) => formatCurrency(v) },
           { title: 'Tax', dataIndex: 'tax_amount', render: (v) => formatCurrency(v) },
           { title: 'Net', dataIndex: 'net_dividend', render: (v) => formatCurrency(v) },
-          { title: 'Collected', dataIndex: 'collected_amount', render: (v) => formatCurrency(v) },
-          { title: 'Uncollected', dataIndex: 'uncollected_amount', render: (v) => formatCurrency(v) },
+          { title: 'Reinvested', dataIndex: 'reinvested_amount', render: (v) => v > 0 ? <Text style={{ color: '#1677ff' }}>{formatCurrency(v)}</Text> : '—' },
+          { title: 'Collected (cash)', dataIndex: 'collected_amount', render: (v) => v > 0 ? <Text style={{ color: '#3f8600' }}>{formatCurrency(v)}</Text> : '—' },
+          { title: 'Transferred', key: 'transferred', render: (_, r) => r.is_transferred
+            ? <Tag color="purple">{formatCurrency(r.net_dividend)} → {r.transfer_to}</Tag>
+            : '—' },
+          { title: 'Blocked', key: 'blocked', render: (_, r) => r.is_blocked
+            ? <Tag color="red">{formatCurrency(r.uncollected_amount)}</Tag>
+            : '—' },
+          { title: 'Uncollected', dataIndex: 'uncollected_amount', render: (v) => v > 0 ? <Text style={{ color: '#cf1322' }}>{formatCurrency(v)}</Text> : '—' },
           { title: 'Status', key: 'status', render: (_, r) => (
-            <Space>
-              <Tag color={r.status === 'collected' ? 'green' : r.status === 'partial' ? 'blue' : r.status === 'transferred' ? 'purple' : 'orange'}>{r.status}</Tag>
+            <Space direction="vertical" size={0}>
+              <Tag color={r.status === 'collected' ? 'green' : r.status === 'partial' ? 'blue' : r.status === 'transferred' ? 'purple' : r.status === 'settled' ? 'green' : 'orange'}>{r.status}</Tag>
               {r.is_blocked && <Tag color="red">BLOCKED</Tag>}
             </Space>
           )},
         ];
       case 'dividend-tax':
         return [
+          { title: 'Sh. ID', key: 'shid', width: 70, render: (_, r) => r.shareholder_id ?? r.shareholder?.id ?? '-' },
           { title: 'Shareholder', key: 'sh', render: (_, r) => r.shareholder ? `${r.shareholder.first_name} ${r.shareholder.last_name}` : '-' },
           { title: 'Fiscal Year', dataIndex: 'fiscal_year' },
           { title: 'Gross Dividend', dataIndex: 'gross_dividend', render: (v) => formatCurrency(v) },
-          { title: 'Tax Amount', dataIndex: 'tax_amount', render: (v) => formatCurrency(v) },
-          { title: 'Tax Rate', key: 'rate', render: (_, r) => r.gross_dividend > 0 ? `${((r.tax_amount / r.gross_dividend) * 100).toFixed(1)}%` : '-' },
-          { title: 'Net Dividend', dataIndex: 'net_dividend', render: (v) => formatCurrency(v) },
+          { title: 'Reinvested (no tax)', dataIndex: 'reinvested_amount', render: v => v > 0 ? <Text style={{ color: '#1677ff' }}>{formatCurrency(v)}</Text> : '—' },
+          { title: 'Taxable Gross', key: 'taxable', render: (_, r) => formatCurrency((Number(r.gross_dividend) || 0) - (Number(r.reinvested_amount) || 0)) },
+          { title: 'Tax Amount', dataIndex: 'tax_amount', render: (v) => <Text style={{ color: '#cf1322' }}>{formatCurrency(v)}</Text> },
+          { title: 'Bracket Rate', key: 'bracket', render: (_, r) => {
+            const taxable = (Number(r.gross_dividend) || 0) - (Number(r.reinvested_amount) || 0);
+            return taxable > 0 ? `${((Number(r.tax_amount) / taxable) * 100).toFixed(2)}%` : '—';
+          } },
+          { title: 'Effective Rate', key: 'effective',
+            render: (_, r) => {
+              if (!r.gross_dividend) return '—';
+              const eff = (Number(r.tax_amount) / Number(r.gross_dividend)) * 100;
+              const taxable = (Number(r.gross_dividend) || 0) - (Number(r.reinvested_amount) || 0);
+              const bracket = taxable > 0 ? (Number(r.tax_amount) / taxable) * 100 : 0;
+              const differs = Math.abs(eff - bracket) > 0.05;
+              const cell = `${eff.toFixed(2)}%`;
+              if (!differs) return cell;
+              return <Text type="secondary">{cell}<Text type="secondary" style={{ fontSize: 10, display: 'block' }}>vs gross</Text></Text>;
+            }
+          },
+          { title: 'Net Dividend', dataIndex: 'net_dividend', render: (v) => <Text style={{ color: '#3f8600' }}>{formatCurrency(v)}</Text> },
+          { title: 'Collected', dataIndex: 'collected_amount', render: v => v > 0 ? <Text style={{ color: '#3f8600' }}>{formatCurrency(v)}</Text> : '—' },
+          { title: 'Uncollected', dataIndex: 'uncollected_amount', render: v => v > 0 ? <Text style={{ color: '#fa8c16' }}>{formatCurrency(v)}</Text> : '—' },
         ];
       case 'top-shareholders':
         return [
@@ -619,6 +855,300 @@ export default function Reports() {
     }
   };
 
+  // ────────────────────────────────────────────────────────────────────
+  // Comprehensive dividend report: three tabs over the same dataset.
+  //   1. Collected & Settled — per-row breakdown of where the dividend went
+  //   2. Uncollected         — focused list with per-shareholder subtotals,
+  //                            ordered by who owes the most attention
+  //   3. Accumulated         — per-shareholder roll-up across all fiscal
+  //                            years (the accrual view)
+  // ────────────────────────────────────────────────────────────────────
+  const renderDividendReport = (rows, sum, fy) => {
+    const fyLabel = fy ? `Fiscal Year ${fy}` : 'All Fiscal Years';
+    const byShareholder = sum?.by_shareholder || [];
+
+    const grandStats = (
+      <Row gutter={16} style={{ marginBottom: 16 }}>
+        <Col xs={12} md={4}><Card size="small"><Statistic title="Gross" value={sum?.total_gross || 0} prefix="ETB" precision={2} /></Card></Col>
+        <Col xs={12} md={4}><Card size="small"><Statistic title="Tax" value={sum?.total_tax || 0} prefix="ETB" precision={2} valueStyle={{ color: '#cf1322' }} /></Card></Col>
+        <Col xs={12} md={4}><Card size="small"><Statistic title="Reinvested" value={sum?.total_reinvested || 0} prefix="ETB" precision={2} valueStyle={{ color: '#1677ff' }} /></Card></Col>
+        <Col xs={12} md={4}><Card size="small"><Statistic title="Collected (cash)" value={sum?.total_collected || 0} prefix="ETB" precision={2} valueStyle={{ color: '#3f8600' }} /></Card></Col>
+        <Col xs={12} md={4}><Card size="small"><Statistic title="Transferred" value={sum?.total_transferred || 0} prefix="ETB" precision={2} valueStyle={{ color: '#722ed1' }} /></Card></Col>
+        <Col xs={12} md={4}><Card size="small"><Statistic title="Uncollected" value={sum?.total_uncollected || 0} prefix="ETB" precision={2} valueStyle={{ color: '#fa8c16' }} /></Card></Col>
+      </Row>
+    );
+
+    // ---- TAB 1: Collected & Settled ----
+    const collectedColumns = getColumns();
+    const collectedRows = rows;
+    const collectedSubtotals = byShareholder.filter(b => (b.total_collected + b.total_reinvested + b.total_transferred + b.total_blocked) > 0);
+
+    // ---- TAB 2: Uncollected (still pending follow-up) ----
+    const uncollectedRows = rows.filter(r => Number(r.uncollected_amount) > 0);
+    const uncollectedSubtotals = byShareholder.filter(b => b.total_uncollected > 0);
+    const uncollectedColumns = [
+      { title: 'Sh. ID', key: 'shid', width: 70, render: (_, r) => r.shareholder_id ?? r.shareholder?.id ?? '-' },
+      { title: 'Shareholder', key: 'sh', render: (_, r) => r.shareholder ? `${r.shareholder.first_name} ${r.shareholder.last_name}` : '-' },
+      { title: 'Account', key: 'acc', render: (_, r) => r.shareholder?.account_no || '-' },
+      { title: 'Fiscal Year', dataIndex: 'fiscal_year' },
+      { title: 'Net (after tax)', dataIndex: 'net_dividend', render: v => formatCurrency(v) },
+      { title: 'Collected so far', dataIndex: 'collected_amount', render: v => formatCurrency(v) },
+      { title: 'Reinvested so far', dataIndex: 'reinvested_amount', render: v => formatCurrency(v) },
+      { title: 'Still Uncollected', dataIndex: 'uncollected_amount', render: v => <Text strong style={{ color: '#cf1322' }}>{formatCurrency(v)}</Text> },
+      { title: 'Status', key: 'st', render: (_, r) => (
+        <Space>
+          <Tag color={r.is_blocked ? 'red' : r.is_transferred ? 'purple' : 'orange'}>{r.is_blocked ? 'BLOCKED' : r.is_transferred ? 'TRANSFERRED' : 'OPEN'}</Tag>
+        </Space>
+      )},
+    ];
+
+    // ---- TAB 3: Accumulated (per-shareholder rollup) ----
+    const accumulatedColumns = [
+      { title: 'Sh. ID', dataIndex: 'shareholder_id', width: 70 },
+      { title: 'Shareholder', dataIndex: 'shareholder_name' },
+      { title: 'Account', dataIndex: 'account_no' },
+      { title: 'Fiscal Years', dataIndex: 'fiscal_years', render: yrs => (yrs || []).map(y => <Tag key={y}>{y}</Tag>) },
+      { title: '# Dividends', dataIndex: 'dividend_count', width: 90 },
+      { title: 'Total Gross', dataIndex: 'total_gross', render: v => formatCurrency(v) },
+      { title: 'Total Tax', dataIndex: 'total_tax', render: v => formatCurrency(v) },
+      { title: 'Total Net', dataIndex: 'total_net', render: v => formatCurrency(v) },
+      { title: 'Reinvested', dataIndex: 'total_reinvested', render: v => <Text style={{ color: '#1677ff' }}>{formatCurrency(v)}</Text> },
+      { title: 'Collected (cash)', dataIndex: 'total_collected', render: v => <Text style={{ color: '#3f8600' }}>{formatCurrency(v)}</Text> },
+      { title: 'Transferred', dataIndex: 'total_transferred', render: v => <Text style={{ color: '#722ed1' }}>{formatCurrency(v)}</Text> },
+      { title: 'Blocked', dataIndex: 'total_blocked', render: v => <Text style={{ color: '#cf1322' }}>{formatCurrency(v)}</Text> },
+      { title: 'Uncollected (accrued)', dataIndex: 'total_uncollected', render: v => <Text strong style={{ color: '#fa8c16' }}>{formatCurrency(v)}</Text> },
+    ];
+
+    const sumSummaryRow = (rows, cols) => {
+      const tot = rows.reduce((acc, r) => {
+        acc.gross += Number(r.total_gross || 0);
+        acc.tax += Number(r.total_tax || 0);
+        acc.net += Number(r.total_net || 0);
+        acc.reinvested += Number(r.total_reinvested || 0);
+        acc.collected += Number(r.total_collected || 0);
+        acc.transferred += Number(r.total_transferred || 0);
+        acc.blocked += Number(r.total_blocked || 0);
+        acc.uncollected += Number(r.total_uncollected || 0);
+        return acc;
+      }, { gross: 0, tax: 0, net: 0, reinvested: 0, collected: 0, transferred: 0, blocked: 0, uncollected: 0 });
+      return (
+        <Table.Summary fixed>
+          <Table.Summary.Row>
+            <Table.Summary.Cell index={0} colSpan={4}><Text strong>Grand Total</Text></Table.Summary.Cell>
+            <Table.Summary.Cell index={1}><Text strong>{rows.length}</Text></Table.Summary.Cell>
+            <Table.Summary.Cell index={2}><Text strong>{formatCurrency(tot.gross)}</Text></Table.Summary.Cell>
+            <Table.Summary.Cell index={3}><Text strong>{formatCurrency(tot.tax)}</Text></Table.Summary.Cell>
+            <Table.Summary.Cell index={4}><Text strong>{formatCurrency(tot.net)}</Text></Table.Summary.Cell>
+            <Table.Summary.Cell index={5}><Text strong style={{ color: '#1677ff' }}>{formatCurrency(tot.reinvested)}</Text></Table.Summary.Cell>
+            <Table.Summary.Cell index={6}><Text strong style={{ color: '#3f8600' }}>{formatCurrency(tot.collected)}</Text></Table.Summary.Cell>
+            <Table.Summary.Cell index={7}><Text strong style={{ color: '#722ed1' }}>{formatCurrency(tot.transferred)}</Text></Table.Summary.Cell>
+            <Table.Summary.Cell index={8}><Text strong style={{ color: '#cf1322' }}>{formatCurrency(tot.blocked)}</Text></Table.Summary.Cell>
+            <Table.Summary.Cell index={9}><Text strong style={{ color: '#fa8c16' }}>{formatCurrency(tot.uncollected)}</Text></Table.Summary.Cell>
+          </Table.Summary.Row>
+        </Table.Summary>
+      );
+    };
+
+    const uncollectedSubtotalCols = [
+      { title: 'Sh. ID', dataIndex: 'shareholder_id', width: 70 },
+      { title: 'Shareholder', dataIndex: 'shareholder_name' },
+      { title: 'Account', dataIndex: 'account_no' },
+      { title: 'Fiscal Years', dataIndex: 'fiscal_years', render: yrs => (yrs || []).map(y => <Tag key={y}>{y}</Tag>) },
+      { title: '# Dividends', dataIndex: 'dividend_count', width: 90 },
+      { title: 'Total Net', dataIndex: 'total_net', render: v => formatCurrency(v) },
+      { title: 'Collected (cash)', dataIndex: 'total_collected', render: v => <Text style={{ color: '#3f8600' }}>{formatCurrency(v)}</Text> },
+      { title: 'Reinvested', dataIndex: 'total_reinvested', render: v => <Text style={{ color: '#1677ff' }}>{formatCurrency(v)}</Text> },
+      { title: 'Blocked', dataIndex: 'total_blocked', render: v => <Text style={{ color: '#cf1322' }}>{formatCurrency(v)}</Text> },
+      { title: 'Still Uncollected', dataIndex: 'total_uncollected', render: v => <Text strong style={{ color: '#fa8c16' }}>{formatCurrency(v)}</Text> },
+    ];
+
+    return (
+      <Card size="small" title={`Dividend Report — ${fyLabel} (${sum.total || rows.length} dividends across ${byShareholder.length} shareholder${byShareholder.length === 1 ? '' : 's'})`}>
+        {grandStats}
+        <Tabs defaultActiveKey="detail" items={[
+          {
+            key: 'detail',
+            label: 'Collected & Settled (Detail)',
+            children: (
+              <>
+                <Text type="secondary" style={{ marginBottom: 8, display: 'block' }}>
+                  Every dividend row with the full breakdown — what was collected as cash, what was reinvested into shares, what was transferred to a beneficiary, what's currently blocked, and what's still uncollected.
+                </Text>
+                <Table dataSource={collectedRows} columns={collectedColumns}
+                  rowKey={(r) => r.id} size="small" scroll={{ x: 1400 }}
+                  pagination={{ pageSize: 30, showSizeChanger: true }} />
+
+                <Divider>Per-Shareholder Subtotals</Divider>
+                <Table dataSource={collectedSubtotals} columns={accumulatedColumns}
+                  rowKey="shareholder_id" size="small" pagination={false}
+                  summary={(r) => sumSummaryRow(r)} />
+              </>
+            ),
+          },
+          {
+            key: 'uncollected',
+            label: <span>Uncollected <Tag color="orange">{uncollectedRows.length}</Tag></span>,
+            children: (
+              <>
+                <Text type="secondary" style={{ marginBottom: 8, display: 'block' }}>
+                  Dividends with money still owed to the shareholder. Use this list for follow-up.
+                </Text>
+                <Table dataSource={uncollectedRows} columns={uncollectedColumns}
+                  rowKey={(r) => r.id} size="small" scroll={{ x: 1100 }}
+                  pagination={{ pageSize: 30, showSizeChanger: true }} />
+
+                <Divider>Per-Shareholder Outstanding</Divider>
+                <Table dataSource={uncollectedSubtotals} columns={uncollectedSubtotalCols}
+                  rowKey="shareholder_id" size="small" pagination={false}
+                  summary={(rs) => {
+                    const tot = rs.reduce((acc, r) => acc + Number(r.total_uncollected || 0), 0);
+                    return (
+                      <Table.Summary fixed>
+                        <Table.Summary.Row>
+                          <Table.Summary.Cell index={0} colSpan={9}><Text strong>Total still uncollected</Text></Table.Summary.Cell>
+                          <Table.Summary.Cell index={1}><Text strong style={{ color: '#fa8c16' }}>{formatCurrency(tot)}</Text></Table.Summary.Cell>
+                        </Table.Summary.Row>
+                      </Table.Summary>
+                    );
+                  }}
+                />
+              </>
+            ),
+          },
+          {
+            key: 'accumulated',
+            label: <span>Accumulated (Accrual) <Tag color="blue">{byShareholder.length}</Tag></span>,
+            children: (
+              <>
+                <Text type="secondary" style={{ marginBottom: 8, display: 'block' }}>
+                  Each shareholder's accumulated dividend history across every fiscal year — the accrual view. Sorted by who has the most uncollected balance so follow-up is prioritised.
+                </Text>
+                <Table dataSource={byShareholder} columns={accumulatedColumns}
+                  rowKey="shareholder_id" size="small" scroll={{ x: 1600 }}
+                  pagination={{ pageSize: 30, showSizeChanger: true }}
+                  summary={(r) => sumSummaryRow(r)}
+                />
+              </>
+            ),
+          },
+        ]} />
+      </Card>
+    );
+  };
+
+  // ────────────────────────────────────────────────────────────────────
+  // Comprehensive dividend TAX report. Surfaces the chain:
+  //   Gross  −  Reinvested (no tax)  =  Taxable Gross
+  //   Tax    =  bracket_rate × Taxable Gross  −  deduction
+  //   Net    =  Taxable Gross − Tax
+  //   Of Net: Collected (cash paid out)  +  Uncollected (still owed)
+  // and shows BOTH the bracket rate (tax÷taxable, the configured 15%) and
+  // the effective rate (tax÷gross) so admin can see when reinvestment has
+  // depressed the effective rate.
+  // ────────────────────────────────────────────────────────────────────
+  const renderDividendTaxReport = (rows, sum, fy) => {
+    const fyLabel = fy ? `Fiscal Year ${fy}` : 'All Fiscal Years';
+    const byShareholder = sum?.by_shareholder || [];
+
+    const grandStats = (
+      <Row gutter={16} style={{ marginBottom: 16 }}>
+        <Col xs={12} md={3}><Card size="small"><Statistic title="Gross" value={sum?.total_gross || 0} prefix="ETB" precision={2} /></Card></Col>
+        <Col xs={12} md={3}><Card size="small"><Statistic title="Reinvested" value={sum?.total_reinvested || 0} prefix="ETB" precision={2} valueStyle={{ color: '#1677ff' }} /></Card></Col>
+        <Col xs={12} md={3}><Card size="small"><Statistic title="Taxable Gross" value={sum?.total_taxable_gross || 0} prefix="ETB" precision={2} /></Card></Col>
+        <Col xs={12} md={3}><Card size="small"><Statistic title="Total Tax" value={sum?.total_tax || 0} prefix="ETB" precision={2} valueStyle={{ color: '#cf1322' }} /></Card></Col>
+        <Col xs={12} md={3}><Card size="small"><Statistic title="Net" value={sum?.total_net || 0} prefix="ETB" precision={2} valueStyle={{ color: '#3f8600' }} /></Card></Col>
+        <Col xs={12} md={4}><Card size="small"><Statistic title="Collected (cash)" value={sum?.total_collected || 0} prefix="ETB" precision={2} /></Card></Col>
+        <Col xs={12} md={4}><Card size="small"><Statistic title="Uncollected" value={sum?.total_uncollected || 0} prefix="ETB" precision={2} valueStyle={{ color: '#fa8c16' }} /></Card></Col>
+      </Row>
+    );
+
+    const subtotalColumns = [
+      { title: 'Sh. ID', dataIndex: 'shareholder_id', width: 70 },
+      { title: 'Shareholder', dataIndex: 'shareholder_name' },
+      { title: 'Account', dataIndex: 'account_no' },
+      { title: 'Fiscal Years', dataIndex: 'fiscal_years', render: yrs => (yrs || []).map(y => <Tag key={y}>{y}</Tag>) },
+      { title: '# Dividends', dataIndex: 'dividend_count', width: 80 },
+      { title: 'Gross', dataIndex: 'total_gross', render: v => formatCurrency(v) },
+      { title: 'Reinvested', dataIndex: 'total_reinvested', render: v => <Text style={{ color: '#1677ff' }}>{formatCurrency(v)}</Text> },
+      { title: 'Taxable Gross', dataIndex: 'total_taxable_gross', render: v => formatCurrency(v) },
+      { title: 'Tax', dataIndex: 'total_tax', render: v => <Text style={{ color: '#cf1322' }}>{formatCurrency(v)}</Text> },
+      { title: 'Bracket %', key: 'br', render: (_, r) => r.total_taxable_gross > 0 ? `${((Number(r.total_tax) / Number(r.total_taxable_gross)) * 100).toFixed(2)}%` : '—' },
+      { title: 'Effective %', key: 'ef', render: (_, r) => r.total_gross > 0 ? `${((Number(r.total_tax) / Number(r.total_gross)) * 100).toFixed(2)}%` : '—' },
+      { title: 'Net', dataIndex: 'total_net', render: v => <Text style={{ color: '#3f8600' }}>{formatCurrency(v)}</Text> },
+      { title: 'Collected', dataIndex: 'total_collected', render: v => formatCurrency(v) },
+      { title: 'Uncollected', dataIndex: 'total_uncollected', render: v => <Text style={{ color: '#fa8c16' }}>{formatCurrency(v)}</Text> },
+    ];
+
+    const subtotalSummary = (rs) => {
+      const tot = rs.reduce((acc, r) => {
+        acc.gross += Number(r.total_gross || 0);
+        acc.reinv += Number(r.total_reinvested || 0);
+        acc.tax += Number(r.total_tax || 0);
+        acc.taxable += Number(r.total_taxable_gross || 0);
+        acc.net += Number(r.total_net || 0);
+        acc.coll += Number(r.total_collected || 0);
+        acc.unc += Number(r.total_uncollected || 0);
+        return acc;
+      }, { gross: 0, reinv: 0, tax: 0, taxable: 0, net: 0, coll: 0, unc: 0 });
+      const bracket = tot.taxable > 0 ? (tot.tax / tot.taxable) * 100 : 0;
+      const effective = tot.gross > 0 ? (tot.tax / tot.gross) * 100 : 0;
+      return (
+        <Table.Summary fixed>
+          <Table.Summary.Row>
+            <Table.Summary.Cell index={0} colSpan={5}><Text strong>Grand Total</Text></Table.Summary.Cell>
+            <Table.Summary.Cell index={1}><Text strong>{formatCurrency(tot.gross)}</Text></Table.Summary.Cell>
+            <Table.Summary.Cell index={2}><Text strong style={{ color: '#1677ff' }}>{formatCurrency(tot.reinv)}</Text></Table.Summary.Cell>
+            <Table.Summary.Cell index={3}><Text strong>{formatCurrency(tot.taxable)}</Text></Table.Summary.Cell>
+            <Table.Summary.Cell index={4}><Text strong style={{ color: '#cf1322' }}>{formatCurrency(tot.tax)}</Text></Table.Summary.Cell>
+            <Table.Summary.Cell index={5}><Text strong>{bracket.toFixed(2)}%</Text></Table.Summary.Cell>
+            <Table.Summary.Cell index={6}><Text strong>{effective.toFixed(2)}%</Text></Table.Summary.Cell>
+            <Table.Summary.Cell index={7}><Text strong style={{ color: '#3f8600' }}>{formatCurrency(tot.net)}</Text></Table.Summary.Cell>
+            <Table.Summary.Cell index={8}><Text strong>{formatCurrency(tot.coll)}</Text></Table.Summary.Cell>
+            <Table.Summary.Cell index={9}><Text strong style={{ color: '#fa8c16' }}>{formatCurrency(tot.unc)}</Text></Table.Summary.Cell>
+          </Table.Summary.Row>
+        </Table.Summary>
+      );
+    };
+
+    return (
+      <Card size="small" title={`Dividend Tax Report — ${fyLabel}`}>
+        {grandStats}
+        <Tabs defaultActiveKey="detail" items={[
+          {
+            key: 'detail',
+            label: 'Per-Dividend Detail',
+            children: (
+              <>
+                <Text type="secondary" style={{ display: 'block', marginBottom: 8 }}>
+                  <strong>Bracket %</strong> = Tax ÷ Taxable Gross — the configured rate (e.g. 15%). <strong>Effective %</strong> = Tax ÷ Gross — what the shareholder's tax-to-gross ratio looks like after reinvested portions are excluded. Differs from bracket rate when reinvested &gt; 0.
+                </Text>
+                <Table dataSource={rows} columns={getColumns()}
+                  rowKey={(r) => r.id} size="small" scroll={{ x: 1600 }}
+                  pagination={{ pageSize: 30, showSizeChanger: true }} />
+              </>
+            ),
+          },
+          {
+            key: 'subtotals',
+            label: <span>Per-Shareholder Subtotals <Tag color="blue">{byShareholder.length}</Tag></span>,
+            children: (
+              <>
+                <Text type="secondary" style={{ display: 'block', marginBottom: 8 }}>
+                  Each shareholder's accumulated tax position across every fiscal year in scope. Sorted by total tax owed (largest first).
+                </Text>
+                <Table dataSource={byShareholder} columns={subtotalColumns}
+                  rowKey="shareholder_id" size="small" scroll={{ x: 1700 }}
+                  pagination={{ pageSize: 30, showSizeChanger: true }}
+                  summary={subtotalSummary}
+                />
+              </>
+            ),
+          },
+        ]} />
+      </Card>
+    );
+  };
+
   // Summary statistics for the current report
   const renderSummary = () => {
     if (!data.length) return null;
@@ -704,15 +1234,13 @@ export default function Reports() {
                   {fiscalYearReports.includes(reportType) && (
                     <Col xs={24} md={4}>
                       <Select
-                        placeholder="Fiscal Year"
+                        placeholder={fiscalYearOptions.length === 0 ? 'No fiscal years yet' : 'Fiscal Year (all if blank)'}
                         style={{ width: '100%' }}
                         allowClear
+                        value={fiscalYear || undefined}
                         onChange={(v) => setFiscalYear(v || '')}
-                        options={[
-                          { value: '2023/2024', label: '2023/2024' },
-                          { value: '2024/2025', label: '2024/2025' },
-                          { value: '2025/2026', label: '2025/2026' },
-                        ]}
+                        options={fiscalYearOptions}
+                        notFoundContent={fiscalYearOptions.length === 0 ? 'Create a fiscal year in Dividend Settings first' : undefined}
                       />
                     </Col>
                   )}
@@ -742,15 +1270,21 @@ export default function Reports() {
               {renderSummary()}
 
               {data.length > 0 ? (
-                <Card size="small"
-                  title={`${allReportTypes.find(r => r.value === reportType)?.label || 'Report'} (${summary.total || data.length} records)`}>
-                  <Table dataSource={data} columns={getColumns()}
-                    rowKey={(r) => r.id || r.shareholder_id || r.date || Math.random()}
-                    size="small" scroll={{ x: 900 }}
-                    pagination={{ pageSize: 50, showSizeChanger: true, pageSizeOptions: [20, 50, 100],
-                      showTotal: (t) => `Total ${t} records` }}
-                  />
-                </Card>
+                reportType === 'dividends'
+                  ? renderDividendReport(data, summary, fiscalYear)
+                  : reportType === 'dividend-tax'
+                  ? renderDividendTaxReport(data, summary, fiscalYear)
+                  : (
+                    <Card size="small"
+                      title={`${allReportTypes.find(r => r.value === reportType)?.label || 'Report'} (${summary.total || data.length} records)`}>
+                      <Table dataSource={data} columns={getColumns()}
+                        rowKey={(r) => r.id || r.shareholder_id || r.date || Math.random()}
+                        size="small" scroll={{ x: 900 }}
+                        pagination={{ pageSize: 50, showSizeChanger: true, pageSizeOptions: [20, 50, 100],
+                          showTotal: (t) => `Total ${t} records` }}
+                      />
+                    </Card>
+                  )
               ) : (
                 !loading && reportType && <Empty description="Select a report type and click Generate" />
               )}
@@ -788,6 +1322,18 @@ export default function Reports() {
                       </Button>
                       {statement && (
                         <>
+                          <Tooltip title="Off (default): the statement shows only approved entries — investments, subscriptions, allocations, and transfers. Turn on to also include rejected items (for audit/diagnostic).">
+                            <Space size={4}>
+                              <Switch
+                                size="small"
+                                checked={includeRejected}
+                                onChange={setIncludeRejected}
+                              />
+                              <Text style={{ fontSize: 12, color: includeRejected ? '#cf1322' : '#666' }}>
+                                Include rejected
+                              </Text>
+                            </Space>
+                          </Tooltip>
                           <Button icon={<FileExcelOutlined />} onClick={exportStatementToExcel}
                             style={{ color: '#217346', borderColor: '#217346' }}>
                             Export Excel
@@ -803,59 +1349,137 @@ export default function Reports() {
               </Card>
 
               {statement && (
-                <div>
-                  <Card size="small" style={{ marginBottom: 16 }}>
-                    <Descriptions bordered size="small" column={{ xs: 1, sm: 2, md: 4 }}
-                      title={<><UserOutlined /> {statement.shareholder?.first_name} {statement.shareholder?.middle_name || ''} {statement.shareholder?.last_name}</>}>
-                      <Descriptions.Item label="Account No">{statement.shareholder?.account_no}</Descriptions.Item>
-                      <Descriptions.Item label="Type">{statement.shareholder?.shareholder_type}</Descriptions.Item>
-                      <Descriptions.Item label="Phone">{statement.shareholder?.phone}</Descriptions.Item>
-                      <Descriptions.Item label="TIN">{statement.shareholder?.tin || '-'}</Descriptions.Item>
-                      <Descriptions.Item label="Total Shares">
-                        <Text strong style={{ color: '#d32f2f', fontSize: 16 }}>{formatNumber(statement.total_shares)}</Text>
-                      </Descriptions.Item>
-                      <Descriptions.Item label="Total Invested">
-                        <Text strong style={{ color: '#52c41a', fontSize: 16 }}>{formatCurrency(statement.total_invested)}</Text>
-                      </Descriptions.Item>
-                      <Descriptions.Item label="Status">
-                        <Tag color={statement.shareholder?.status === 'active' ? 'green' : 'red'}>
-                          {statement.shareholder?.status}
-                        </Tag>
-                      </Descriptions.Item>
-                      {statement.allocations?.length > 0 && (() => {
-                        const totalPaid = statement.allocations.reduce((s, a) => s + (a.paid_shares || 0), 0);
-                        const totalUnpaid = statement.allocations.reduce((s, a) => s + (a.unpaid_shares || 0), 0);
-                        const totalBlocked = statement.allocations.reduce((s, a) => s + (a.paid_blocked || 0) + (a.unpaid_blocked || 0), 0);
-                        return (
-                          <>
-                            <Descriptions.Item label="Paid Shares"><Tag color="blue">{formatNumber(totalPaid)}</Tag></Descriptions.Item>
-                            <Descriptions.Item label="Unpaid Shares"><Tag color="orange">{formatNumber(totalUnpaid)}</Tag></Descriptions.Item>
-                            <Descriptions.Item label="Total Blocked"><Tag color="red">{formatNumber(totalBlocked)}</Tag></Descriptions.Item>
-                          </>
-                        );
-                      })()}
-                    </Descriptions>
-                  </Card>
+                // Paper-styled container — visual parity with the printed PDF.
+                <div style={{
+                  background: '#fff',
+                  maxWidth: 1080,
+                  margin: '0 auto',
+                  padding: '32px 40px',
+                  boxShadow: '0 2px 10px rgba(0,0,0,0.08)',
+                  borderRadius: 4,
+                  fontFamily: "'Segoe UI', Arial, sans-serif",
+                  color: '#333',
+                }}>
+                  {/* Bank statement header */}
+                  <div style={{
+                    textAlign: 'center',
+                    borderBottom: '3px double #1a3a5c',
+                    paddingBottom: 16,
+                    marginBottom: 18,
+                  }}>
+                    <div style={{ color: '#1a3a5c', fontSize: 24, fontWeight: 700, letterSpacing: 1 }}>
+                      ZEMEN BANK S.C.
+                    </div>
+                    <div style={{ color: '#1a3a5c', fontSize: 15, marginTop: 2 }}>
+                      ዘመን ባንክ አ.ማ.
+                    </div>
+                    <div style={{ color: '#333', fontSize: 17, fontWeight: 600, marginTop: 12 }}>
+                      Shareholder Statement
+                    </div>
+                  </div>
 
+                  <div style={{
+                    display: 'flex', justifyContent: 'space-between',
+                    fontSize: 12, color: '#666', marginBottom: 18,
+                  }}>
+                    <span>Generated: {dayjs().format('MMMM D, YYYY h:mm A')}</span>
+                    <span>Statement for Account No {statement.shareholder?.account_no}</span>
+                  </div>
+
+                  {/* Account summary — bordered box matching the print version */}
+                  <div style={{
+                    background: '#f0f5ff',
+                    border: '1px solid #adc6ff',
+                    borderRadius: 4,
+                    padding: 16,
+                    marginBottom: 22,
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(4, 1fr)',
+                    gap: '14px 24px',
+                  }}>
+                    {[
+                      ['Account No', statement.shareholder?.account_no || '—'],
+                      ['Name', `${statement.shareholder?.first_name || ''} ${statement.shareholder?.middle_name || ''} ${statement.shareholder?.last_name || ''}`.replace(/\s+/g, ' ').trim()],
+                      ['Type', statement.shareholder?.shareholder_type || '—'],
+                      ['Total Shares', formatNumber(statement.total_shares)],
+                      ['Total Invested', formatCurrency(statement.total_invested)],
+                      ['TIN', statement.shareholder?.tin || '—'],
+                      ['Phone', statement.shareholder?.phone || '—'],
+                      ['Status', (statement.shareholder?.status || '—').toUpperCase()],
+                      ...(statement.allocations?.length > 0 ? (() => {
+                        const tp = statement.allocations.reduce((s, a) => s + (a.paid_shares || 0), 0);
+                        const tu = statement.allocations.reduce((s, a) => s + (a.unpaid_shares || 0), 0);
+                        const tb = statement.allocations.reduce((s, a) => s + (a.paid_blocked || 0) + (a.unpaid_blocked || 0), 0);
+                        return [
+                          ['Paid Shares', formatNumber(tp)],
+                          ['Unpaid Shares', formatNumber(tu)],
+                          ['Total Blocked', formatNumber(tb)],
+                        ];
+                      })() : []),
+                    ].map(([label, value]) => (
+                      <div key={label}>
+                        <div style={{ fontSize: 11, color: '#666', textTransform: 'uppercase', letterSpacing: 0.5 }}>{label}</div>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: '#1a3a5c', marginTop: 2 }}>{value}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Sub-tabs: Statement (default) | Share Certificate Register */}
+                  <Tabs
+                    activeKey={statementSubTab}
+                    onChange={setStatementSubTab}
+                    style={{ marginBottom: 8 }}
+                    items={[
+                      { key: 'statement', label: 'Statement' },
+                      { key: 'certificate', label: 'Share Certificate Register' },
+                    ]}
+                  />
+
+                  {statementSubTab === 'statement' && (<>
                   {/* Investments */}
-                  <Card size="small" title={`Investments (${statement.investments?.length || 0})`} style={{ marginBottom: 12 }}>
-                    <Table dataSource={statement.investments || []} rowKey="id" size="small" pagination={false}
+                  {(() => {
+                    const investments = filterApproved(statement.investments);
+                    const rejectedCount = (statement.investments?.length || 0) - investments.length;
+                    return (
+                  <div style={{ marginBottom: 18 }}>
+                    <div style={statementSectionTitleStyle}>
+                      Investments ({investments.length})
+                      {rejectedCount > 0 && (
+                        <Text type="secondary" style={{ fontSize: 11, fontWeight: 400, marginLeft: 8 }}>
+                          · {rejectedCount} rejected hidden
+                        </Text>
+                      )}
+                    </div>
+                    <Table dataSource={investments} rowKey="id" size="small" pagination={false}
                       columns={[
                         { title: 'Date', dataIndex: 'payment_date', render: (d) => d ? dayjs(d).format('YYYY-MM-DD') : '-' },
                         { title: 'Amount', dataIndex: 'amount', render: (v) => formatCurrency(v) },
                         { title: 'Shares', dataIndex: 'number_of_shares', render: (v) => formatNumber(v) },
                         { title: 'Par Value', dataIndex: 'par_value', render: (v) => formatCurrency(v) },
                         { title: 'Method', dataIndex: 'payment_method' },
-                        { title: 'Reference', dataIndex: 'reference_no' },
-                        { title: 'Status', dataIndex: 'approval_status', render: (s) => <Tag color={s === 'approved' ? 'green' : 'orange'}>{s}</Tag> },
+                        { title: 'Reference', dataIndex: 'reference_no', render: v => v || '—' },
+                        { title: 'Status', dataIndex: 'approval_status', render: (s) => <Tag color={s === 'approved' ? 'green' : s === 'rejected' ? 'red' : 'orange'}>{s}</Tag> },
                       ]}
                     />
-                  </Card>
+                  </div>
+                  );})()}
 
                   {/* Subscriptions */}
-                  {statement.subscriptions?.length > 0 && (
-                    <Card size="small" title={`Subscriptions (${statement.subscriptions.length})`} style={{ marginBottom: 12 }}>
-                      <Table dataSource={statement.subscriptions} rowKey="id" size="small" pagination={false}
+                  {(() => {
+                    const subscriptions = filterApproved(statement.subscriptions);
+                    if (subscriptions.length === 0) return null;
+                    const rejectedCount = (statement.subscriptions?.length || 0) - subscriptions.length;
+                    return (
+                    <div style={{ marginBottom: 18 }}>
+                      <div style={statementSectionTitleStyle}>
+                        Subscriptions ({subscriptions.length})
+                        {rejectedCount > 0 && (
+                          <Text type="secondary" style={{ fontSize: 11, fontWeight: 400, marginLeft: 8 }}>
+                            · {rejectedCount} rejected hidden
+                          </Text>
+                        )}
+                      </div>
+                      <Table dataSource={subscriptions} rowKey="id" size="small" pagination={false}
                         columns={[
                           { title: 'Shares', dataIndex: 'number_of_shares' },
                           { title: 'Amount', dataIndex: 'share_amount', render: (v) => formatCurrency(v) },
@@ -863,11 +1487,15 @@ export default function Reports() {
                           { title: 'Status', dataIndex: 'status', render: (s) => <Tag color={s === 'active' ? 'green' : s === 'extended' ? 'blue' : 'red'}>{s}</Tag> },
                         ]}
                       />
-                    </Card>
-                  )}
+                    </div>
+                    );
+                  })()}
 
                   {/* Dividends */}
-                  <Card size="small" title={`Dividends (${statement.dividends?.length || 0})`} style={{ marginBottom: 12 }}>
+                  <div style={{ marginBottom: 18 }}>
+                    <div style={statementSectionTitleStyle}>
+                      Dividends ({statement.dividends?.length || 0})
+                    </div>
                     <Table dataSource={statement.dividends || []} rowKey="id" size="small" pagination={false}
                       columns={[
                         { title: 'Fiscal Year', dataIndex: 'fiscal_year' },
@@ -879,12 +1507,24 @@ export default function Reports() {
                         { title: 'Status', dataIndex: 'status', render: (s) => <Tag color={s === 'collected' ? 'green' : s === 'partial' ? 'blue' : 'orange'}>{s}</Tag> },
                       ]}
                     />
-                  </Card>
+                  </div>
 
                   {/* Allocations */}
-                  {statement.allocations?.length > 0 && (
-                    <Card size="small" title={`Allocations (${statement.allocations.length})`} style={{ marginBottom: 12 }}>
-                      <Table dataSource={statement.allocations} rowKey="id" size="small" pagination={false}
+                  {(() => {
+                    const allocations = filterApproved(statement.allocations);
+                    if (allocations.length === 0) return null;
+                    const rejectedCount = (statement.allocations?.length || 0) - allocations.length;
+                    return (
+                    <div style={{ marginBottom: 18 }}>
+                      <div style={statementSectionTitleStyle}>
+                        Allocations ({allocations.length})
+                        {rejectedCount > 0 && (
+                          <Text type="secondary" style={{ fontSize: 11, fontWeight: 400, marginLeft: 8 }}>
+                            · {rejectedCount} rejected hidden
+                          </Text>
+                        )}
+                      </div>
+                      <Table dataSource={allocations} rowKey="id" size="small" pagination={false}
                         columns={[
                           { title: 'Alloc No', dataIndex: 'allocation_no', width: 110 },
                           { title: 'Round', dataIndex: 'round', width: 60 },
@@ -898,13 +1538,26 @@ export default function Reports() {
                           { title: 'Approval', dataIndex: 'approval_status', width: 90, render: (s) => <Tag color={s === 'approved' ? 'green' : 'orange'}>{s}</Tag> },
                         ]}
                       />
-                    </Card>
-                  )}
+                    </div>
+                    );
+                  })()}
 
                   {/* Transfers */}
-                  {statement.transfers?.length > 0 && (
-                    <Card size="small" title={`Transfers (${statement.transfers.length})`} style={{ marginBottom: 12 }}>
-                      <Table dataSource={statement.transfers} rowKey="id" size="small" pagination={false}
+                  {(() => {
+                    const transfers = filterApproved(statement.transfers);
+                    if (transfers.length === 0) return null;
+                    const rejectedCount = (statement.transfers?.length || 0) - transfers.length;
+                    return (
+                    <div style={{ marginBottom: 18 }}>
+                      <div style={statementSectionTitleStyle}>
+                        Transfers ({transfers.length})
+                        {rejectedCount > 0 && (
+                          <Text type="secondary" style={{ fontSize: 11, fontWeight: 400, marginLeft: 8 }}>
+                            · {rejectedCount} rejected hidden
+                          </Text>
+                        )}
+                      </div>
+                      <Table dataSource={transfers} rowKey="id" size="small" pagination={false}
                         expandable={{
                           expandedRowRender: (record) => (record.lines?.length || 0) > 0 ? (
                             <Table dataSource={record.lines} rowKey="id" size="small" pagination={false}
@@ -946,12 +1599,16 @@ export default function Reports() {
                           { title: 'Status', dataIndex: 'status', width: 90, render: (s) => <Tag color={s === 'approved' ? 'green' : 'orange'}>{s}</Tag> },
                         ]}
                       />
-                    </Card>
-                  )}
+                    </div>
+                    );
+                  })()}
 
                   {/* Blocks */}
                   {statement.blocks?.length > 0 && (
-                    <Card size="small" title={`Share Blocks (${statement.blocks.length})`} style={{ marginBottom: 12 }}>
+                    <div style={{ marginBottom: 18 }}>
+                      <div style={statementSectionTitleStyle}>
+                        Share Blocks ({statement.blocks.length})
+                      </div>
                       <Table dataSource={statement.blocks} rowKey="id" size="small" pagination={false}
                         columns={[
                           { title: 'Allocation', key: 'alloc', width: 130,
@@ -978,8 +1635,73 @@ export default function Reports() {
                           { title: 'Released', key: 'released', width: 80, render: (_, r) => <Tag color={r.is_released ? 'green' : 'red'}>{r.is_released ? 'Yes' : 'No'}</Tag> },
                         ]}
                       />
-                    </Card>
+                    </div>
                   )}
+                  </>)}
+
+                  {statementSubTab === 'certificate' && (() => {
+                    const reg = buildCertificateRegister(statement);
+                    return (
+                      <div style={{ marginBottom: 18 }}>
+                        <div style={statementSectionTitleStyle}>
+                          Share Certificate Register ({reg.rows.length})
+                        </div>
+                        <div style={{ fontSize: 11, color: '#666', marginBottom: 8 }}>
+                          Each row is a paid-up share tranche issued to the shareholder. <b>ceri-no From / To</b> is computed cumulatively in chronological order.
+                          {!includeRejected && ' Only approved investments are shown.'}
+                        </div>
+                        <Table
+                          dataSource={reg.rows}
+                          rowKey="key"
+                          size="small"
+                          pagination={false}
+                          bordered
+                          scroll={{ x: 1400 }}
+                          summary={() => (
+                            <Table.Summary fixed>
+                              <Table.Summary.Row style={{ background: '#d9d9d9', fontWeight: 700 }}>
+                                <Table.Summary.Cell index={0} colSpan={3}>
+                                  Total Paid up As of {dayjs().format('MMM DD/YYYY')}
+                                </Table.Summary.Cell>
+                                <Table.Summary.Cell index={3} colSpan={7} />
+                                <Table.Summary.Cell index={10} align="right">{formatCurrency(reg.total_amount)}</Table.Summary.Cell>
+                                <Table.Summary.Cell index={11} align="right">{formatNumber(reg.total_shares)}</Table.Summary.Cell>
+                              </Table.Summary.Row>
+                            </Table.Summary>
+                          )}
+                          columns={[
+                            { title: 'SH-ID', dataIndex: 'sh_id', width: 70, align: 'center' },
+                            { title: 'Certificate No.', dataIndex: 'cert_no', width: 110, render: v => v || '—' },
+                            { title: 'Pad No', dataIndex: 'pad_no', width: 80, render: v => v || '—' },
+                            { title: 'Issuance Status', dataIndex: 'issuance_status', width: 110,
+                              render: s => s ? <Tag color={s === 'Issued' ? 'green' : 'orange'}>{s}</Tag> : '—' },
+                            { title: 'ceri-no From', dataIndex: 'from_no', width: 100, align: 'right',
+                              render: v => v ? formatNumber(v) : '—' },
+                            { title: 'ceri-no To', dataIndex: 'to_no', width: 100, align: 'right',
+                              render: v => v ? formatNumber(v) : '—' },
+                            { title: 'Amharic Date of Registration', dataIndex: 'amharic_date', width: 150, render: v => v || '—' },
+                            { title: 'Date of Registration', dataIndex: 'date_of_registration', width: 120,
+                              render: d => d ? dayjs(d).format('D-MMM-YY') : '—' },
+                            { title: 'Name of the Shareholder', dataIndex: 'english_name', width: 200 },
+                            { title: 'Amharic Name of the Shareholder', dataIndex: 'amharic_name', width: 200,
+                              render: v => v || '—' },
+                            { title: 'Share Paid-up', dataIndex: 'share_paid_up', width: 140, align: 'right',
+                              render: v => formatCurrency(v) },
+                            { title: 'Share Amount', dataIndex: 'share_amount', width: 110, align: 'right',
+                              render: v => formatNumber(v) },
+                          ]}
+                        />
+                      </div>
+                    );
+                  })()}
+
+                  {/* Statement footer */}
+                  <div style={{
+                    marginTop: 30, paddingTop: 12, borderTop: '1px solid #ddd',
+                    textAlign: 'center', fontSize: 11, color: '#999',
+                  }}>
+                    This is a system-generated statement. For any inquiries, contact the company secretariat.
+                  </div>
                 </div>
               )}
             </>

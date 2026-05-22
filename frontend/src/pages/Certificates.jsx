@@ -1,11 +1,11 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   Table, Button, Modal, Form, Input, InputNumber, DatePicker, Select,
   Space, Tag, message, Typography, Row, Col, Radio, Card,
   Statistic, Divider, Popconfirm,
 } from 'antd';
 import {
-  PlusOutlined, PrinterOutlined, EyeOutlined,
+  PlusOutlined, PrinterOutlined, EyeOutlined, FilterOutlined,
   FileProtectOutlined, ApartmentOutlined, TeamOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
@@ -13,8 +13,27 @@ import {
   getCertificates, getCertificate, getNextCertNo, createCertificate,
   printCertificate, updateCertificate,
   searchShareholders, getShareholders, getShareholderInvestmentSummary, getBankCapital,
+  searchCertificatesAdvanced,
 } from '../services/api';
 import { formatCurrency } from '../utils/format';
+import AdvancedSearchPanel from '../components/AdvancedSearchPanel';
+
+const CERT_FIELDS = [
+  { key: 'id',               label: 'Certificate ID',  type: 'int' },
+  { key: 'shareholder_id',   label: 'Shareholder ID',  type: 'int' },
+  { key: 'allocation_id',    label: 'Allocation ID',   type: 'int' },
+  { key: 'certificate_no',   label: 'Certificate No',  type: 'string' },
+  { key: 'number_of_shares', label: 'Number of Shares',type: 'int' },
+  { key: 'par_value',        label: 'Par Value',       type: 'number' },
+  { key: 'total_value',      label: 'Total Value',     type: 'number' },
+  { key: 'status',           label: 'Status',          type: 'enum', options: [{value:'active',label:'Active'},{value:'cancelled',label:'Cancelled'},{value:'replaced',label:'Replaced'}] },
+  { key: 'cert_scope',       label: 'Scope',           type: 'enum', options: [{value:'total',label:'Total Holdings'},{value:'per_allocation',label:'Per Allocation'}] },
+  { key: 'is_printed',       label: 'Printed',         type: 'bool' },
+  { key: 'remark',           label: 'Remark',          type: 'string' },
+  { key: 'issue_date',       label: 'Issue Date',      type: 'date' },
+  { key: 'printed_at',       label: 'Printed At',      type: 'date' },
+  { key: 'created_at',       label: 'Created Date',    type: 'date' },
+];
 
 const { Title, Text } = Typography;
 
@@ -339,7 +358,10 @@ export default function Certificates() {
   const [form] = Form.useForm();
 
   // ── data ──
-  const fetchData = async () => {
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [activeFilters, setActiveFilters] = useState(null);
+
+  const fetchSimple = useCallback(async () => {
     setLoading(true);
     try {
       const res = await getCertificates({ page, page_size: 20 });
@@ -347,9 +369,31 @@ export default function Certificates() {
       setTotal(res.data.total || 0);
     } catch { message.error('Failed to load certificates'); }
     setLoading(false);
-  };
+  }, [page]);
 
-  useEffect(() => { fetchData(); }, [page]);
+  const fetchAdvanced = useCallback(async (filters) => {
+    setLoading(true);
+    try {
+      const res = await searchCertificatesAdvanced({ filters, page, page_size: 20 });
+      setData(res.data.data || []);
+      setTotal(res.data.total || 0);
+    } catch (err) { message.error(err.response?.data?.error || 'Search failed'); }
+    setLoading(false);
+  }, [page]);
+
+  useEffect(() => {
+    if (activeFilters) fetchAdvanced(activeFilters);
+    else fetchSimple();
+  }, [activeFilters, fetchAdvanced, fetchSimple]);
+
+  const runAdvancedSearch = (cleaned) => {
+    if (cleaned.length === 0) { message.warning('Add at least one filter.'); return; }
+    setPage(1);
+    setActiveFilters(cleaned);
+  };
+  const resetAdvancedSearch = () => { setActiveFilters(null); setPage(1); };
+
+  const fetchData = () => { if (activeFilters) fetchAdvanced(activeFilters); else fetchSimple(); };
 
   // ── shareholder search ──
   const loadShareholders = async (list) => {
@@ -501,6 +545,7 @@ export default function Certificates() {
   // ── table columns ──
   const columns = [
     { title: 'Certificate No', dataIndex: 'certificate_no', width: 140 },
+    { title: 'Sh. ID', key: 'shid', width: 75, render: (_, r) => r.shareholder_id ?? r.shareholder?.id ?? '-' },
     {
       title: 'Shareholder', key: 'sh', width: 180,
       render: (_, r) => r.shareholder
@@ -557,6 +602,28 @@ export default function Certificates() {
           Issue Certificate
         </Button>
       </Row>
+
+      <Row style={{ marginBottom: 12 }} align="middle">
+        <Button
+          icon={<FilterOutlined />}
+          type={advancedOpen ? 'primary' : 'default'}
+          onClick={() => setAdvancedOpen(o => !o)}
+        >
+          {advancedOpen ? 'Hide Advanced Search' : 'Advanced Search'}
+        </Button>
+        {activeFilters && (
+          <Tag color="blue" closable onClose={resetAdvancedSearch} style={{ marginLeft: 8 }}>
+            {activeFilters.length} filter{activeFilters.length === 1 ? '' : 's'} applied
+          </Tag>
+        )}
+      </Row>
+
+      <AdvancedSearchPanel
+        fields={CERT_FIELDS}
+        open={advancedOpen}
+        onSearch={runAdvancedSearch}
+        onReset={resetAdvancedSearch}
+      />
 
       <Table
         dataSource={data} columns={columns} rowKey="id"

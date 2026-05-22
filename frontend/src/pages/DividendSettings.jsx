@@ -12,7 +12,7 @@ import {
 import dayjs from 'dayjs';
 import {
   getDividendSettings, createDividendSetting, updateDividendSetting,
-  processDividend, getDPSSummary, getDividendTaxSchedules,
+  processDividend, deleteDividendSetting, getDPSSummary, getDividendTaxSchedules,
   createDividendTaxBracket, updateDividendTaxBracket, deleteDividendTaxBracket,
   getSystemSetting, updateSystemSetting, testFormula,
 } from '../services/api';
@@ -340,6 +340,18 @@ export default function DividendSettings() {
     }
   };
 
+  const handleDeleteSetting = async (id) => {
+    try {
+      const res = await deleteDividendSetting(id);
+      message.success(res.data?.message || 'Fiscal year deleted');
+      fetchData();
+    } catch (err) {
+      // Backend returns 409 with a precise human-readable reason when something
+      // (collected / reinvested / blocked / transferred) prevents cascade delete.
+      message.error(err.response?.data?.error || 'Failed to delete', 8);
+    }
+  };
+
   const handleTaxSubmit = async (values) => {
     try {
       if (editingTax) {
@@ -375,7 +387,7 @@ export default function DividendSettings() {
     { title: 'DPS', dataIndex: 'dividend_per_share', render: v => v ? v.toFixed(4) : '-' },
     { title: 'Status', dataIndex: 'status', render: s => <Tag color={s === 'processed' ? 'green' : s === 'declared' ? 'blue' : 'default'}>{s}</Tag> },
     {
-      title: 'Actions', key: 'actions', width: 180,
+      title: 'Actions', key: 'actions', width: 240,
       render: (_, r) => (
         <Space>
           {!r.is_processed && (
@@ -394,6 +406,20 @@ export default function DividendSettings() {
               </Popconfirm>
             </>
           )}
+          <Popconfirm
+            title={`Delete fiscal year ${r.fiscal_year}?`}
+            description={
+              <div style={{ maxWidth: 320 }}>
+                This removes the fiscal-year setting <strong>and every per-shareholder dividend it produced</strong>, plus their action history.
+                Blocked if any dividend has already been collected as cash or reinvested into investments — reverse those first.
+              </div>
+            }
+            okText="Delete"
+            okButtonProps={{ danger: true }}
+            onConfirm={() => handleDeleteSetting(r.id)}
+          >
+            <Button size="small" danger icon={<DeleteOutlined />}>Delete</Button>
+          </Popconfirm>
         </Space>
       ),
     },

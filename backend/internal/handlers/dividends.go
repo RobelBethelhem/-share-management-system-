@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"fmt"
 	"math"
 	"net/http"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 	"share-management-system/internal/models"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 // Dividend Settings
@@ -312,6 +314,94 @@ func calculateDividendTax(amount float64, schedules []models.DividendTaxSchedule
 	return 0
 }
 
+// DeleteDividendSetting wipes a fiscal-year dividend run end-to-end so the
+// admin can re-declare and re-process during testing or after a botched run:
+// the DividendSetting row, every per-shareholder Dividend it produced, and
+// every DividendAction in their history.
+//
+// Safety: the cascade refuses if real money has already moved against any of
+// the dividends — specifically, if any of them have collected_amount > 0
+// (cash paid out) or reinvested_amount > 0 (used to fund Investment rows).
+// In those cases the admin should reverse the collections/reinvestments
+// first, then retry the delete.
+func DeleteDividendSetting(c *gin.Context) {
+	id := c.Param("id")
+	var setting models.DividendSetting
+	if err := database.DB.First(&setting, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Dividend setting not found"})
+		return
+	}
+
+	var dividends []models.Dividend
+	database.DB.Where("dividend_setting_id = ?", setting.ID).Find(&dividends)
+
+	var totalCollected, totalReinvested float64
+	var blockedCount, transferredCount int
+	for _, d := range dividends {
+		totalCollected += d.CollectedAmount
+		totalReinvested += d.ReinvestedAmount
+		if d.IsBlocked {
+			blockedCount++
+		}
+		if d.IsTransferred {
+			transferredCount++
+		}
+	}
+	var blockers []string
+	if totalCollected > 0 {
+		blockers = append(blockers, fmt.Sprintf("ETB %.2f already collected as cash", totalCollected))
+	}
+	if totalReinvested > 0 {
+		blockers = append(blockers, fmt.Sprintf("ETB %.2f reinvested into Investment rows", totalReinvested))
+	}
+	if blockedCount > 0 {
+		blockers = append(blockers, fmt.Sprintf("%d dividends are blocked", blockedCount))
+	}
+	if transferredCount > 0 {
+		blockers = append(blockers, fmt.Sprintf("%d dividends were transferred (inheritance / legal order)", transferredCount))
+	}
+	if len(blockers) > 0 {
+		msg := "Cannot delete fiscal year " + setting.FiscalYear + " — "
+		for i, b := range blockers {
+			if i > 0 {
+				msg += "; "
+			}
+			msg += b
+		}
+		msg += ". Reverse those actions first."
+		c.JSON(http.StatusConflict, gin.H{"error": msg})
+		return
+	}
+
+	dividendIDs := make([]uint, 0, len(dividends))
+	for _, d := range dividends {
+		dividendIDs = append(dividendIDs, d.ID)
+	}
+
+	err := database.DB.Transaction(func(tx *gorm.DB) error {
+		if len(dividendIDs) > 0 {
+			if err := tx.Where("dividend_id IN ?", dividendIDs).
+				Delete(&models.DividendAction{}).Error; err != nil {
+				return err
+			}
+		}
+		if err := tx.Where("dividend_setting_id = ?", setting.ID).
+			Delete(&models.Dividend{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&setting).Error
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"message":             fmt.Sprintf("Deleted fiscal year %s (and %d dividends)", setting.FiscalYear, len(dividends)),
+		"deleted_setting_id":  setting.ID,
+		"deleted_dividends":   len(dividends),
+	})
+}
+
 // Dividend Payments
 func GetDividends(c *gin.Context) {
 	var dividends []models.Dividend
@@ -334,7 +424,43 @@ func GetDividends(c *gin.Context) {
 	offset := (page - 1) * pageSize
 	query.Offset(offset).Limit(pageSize).Order("id DESC").Find(&dividends)
 
-	c.JSON(http.StatusOK, gin.H{"data": dividends, "total": total, "page": page, "page_size": pageSize})
+	// Augment each row with the live recomputed weighted_shares/gross/tax/net
+	// so the UI can show current truth (post-transfers) alongside the stored
+	// processing-time snapshot. We expose both — the frontend decides which
+	// to show as primary and which as tooltip.
+	type augmented struct {
+		models.Dividend
+		LiveWeightedShares float64 `json:"live_weighted_shares"`
+		LiveGrossDividend  float64 `json:"live_gross_dividend"`
+		LiveTaxAmount      float64 `json:"live_tax_amount"`
+		LiveNetDividend    float64 `json:"live_net_dividend"`
+	}
+	out := make([]augmented, 0, len(dividends))
+	for _, d := range dividends {
+		live := computeLiveDividend(d, d.DividendSetting)
+		out = append(out, augmented{
+			Dividend:           d,
+			LiveWeightedShares: live.WeightedShares,
+			LiveGrossDividend:  live.Gross,
+			LiveTaxAmount:      live.Tax,
+			LiveNetDividend:    live.Net,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": out, "total": total, "page": page, "page_size": pageSize})
+}
+
+// GetDividend returns one dividend row with the shareholder and fiscal-year
+// setting preloaded — used by the Authorization page's review modal.
+func GetDividend(c *gin.Context) {
+	id := c.Param("id")
+	var dividend models.Dividend
+	if err := database.DB.Preload("Shareholder").Preload("DividendSetting").
+		First(&dividend, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Dividend not found"})
+		return
+	}
+	c.JSON(http.StatusOK, dividend)
 }
 
 func CollectDividend(c *gin.Context) {
@@ -379,6 +505,15 @@ func CollectDividend(c *gin.Context) {
 	}
 
 	database.DB.Save(&dividend)
+	logDividendAction(database.DB, models.DividendAction{
+		DividendID:    dividend.ID,
+		ActionType:    "collect",
+		Amount:        input.Amount,
+		Description:   fmt.Sprintf("Collected ETB %.2f via %s", input.Amount, input.PaymentMethod),
+		PaymentMethod: input.PaymentMethod,
+		Remark:        input.Remark,
+		ActedByUserID: getUserID(c),
+	})
 	c.JSON(http.StatusOK, gin.H{"message": "Dividend collected", "remaining": dividend.UncollectedAmount})
 }
 
@@ -389,15 +524,32 @@ func BlockDividend(c *gin.Context) {
 	}
 	c.ShouldBindJSON(&input)
 
+	var dividend models.Dividend
+	database.DB.First(&dividend, id)
 	database.DB.Model(&models.Dividend{}).Where("id = ?", id).
 		Updates(map[string]interface{}{"is_blocked": true, "block_reason": input.Reason})
+	logDividendAction(database.DB, models.DividendAction{
+		DividendID:    dividend.ID,
+		ActionType:    "block",
+		Description:   "Dividend blocked: " + input.Reason,
+		Remark:        input.Reason,
+		ActedByUserID: getUserID(c),
+	})
 	c.JSON(http.StatusOK, gin.H{"message": "Dividend blocked"})
 }
 
 func ReleaseDividend(c *gin.Context) {
 	id := c.Param("id")
+	var dividend models.Dividend
+	database.DB.First(&dividend, id)
 	database.DB.Model(&models.Dividend{}).Where("id = ?", id).
 		Updates(map[string]interface{}{"is_blocked": false, "block_reason": ""})
+	logDividendAction(database.DB, models.DividendAction{
+		DividendID:    dividend.ID,
+		ActionType:    "release",
+		Description:   "Block released",
+		ActedByUserID: getUserID(c),
+	})
 	c.JSON(http.StatusOK, gin.H{"message": "Dividend released"})
 }
 
@@ -412,6 +564,8 @@ func TransferDividend(c *gin.Context) {
 		return
 	}
 
+	var dividend models.Dividend
+	database.DB.First(&dividend, id)
 	database.DB.Model(&models.Dividend{}).Where("id = ?", id).
 		Updates(map[string]interface{}{
 			"is_transferred":   true,
@@ -419,6 +573,13 @@ func TransferDividend(c *gin.Context) {
 			"transfer_reason": input.Reason,
 			"status":          "transferred",
 		})
+	logDividendAction(database.DB, models.DividendAction{
+		DividendID:    dividend.ID,
+		ActionType:    "transfer",
+		Description:   fmt.Sprintf("Transferred to %s (%s)", input.TransferTo, input.Reason),
+		Remark:        input.Reason,
+		ActedByUserID: getUserID(c),
+	})
 	c.JSON(http.StatusOK, gin.H{"message": "Dividend transfer recorded"})
 }
 

@@ -10,6 +10,40 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// shareholderFieldType maps each searchable column to its semantic type.
+// Columns NOT in this map cannot be queried — this is the whitelist that
+// keeps the advanced-search endpoint safe from SQL injection via field names.
+var shareholderFieldType = map[string]string{
+	"id":                 "int",
+	"account_no":         "string",
+	"first_name":         "string",
+	"middle_name":        "string",
+	"last_name":          "string",
+	"first_name_am":      "string",
+	"middle_name_am":     "string",
+	"last_name_am":       "string",
+	"tin":                "string",
+	"national_id_no":     "string",
+	"passport_no":        "string",
+	"nationality":        "string",
+	"nationality_am":     "string",
+	"shareholder_type":   "enum",
+	"gender":             "enum",
+	"status":             "enum",
+	"phone":              "string",
+	"phone2":             "string",
+	"phone3":             "string",
+	"email":              "string",
+	"email2":             "string",
+	"email3":             "string",
+	"is_staff":           "bool",
+	"is_foreign":         "bool",
+	"citizenship_status": "string",
+	"date_of_birth":      "date",
+	"created_at":         "date",
+	"updated_at":         "date",
+}
+
 func GetShareholders(c *gin.Context) {
 	var shareholders []models.Shareholder
 	query := database.DB.Preload("Address")
@@ -51,6 +85,33 @@ func GetShareholders(c *gin.Context) {
 		"total":     total,
 		"page":      page,
 		"page_size": pageSize,
+	})
+}
+
+// SearchShareholdersAdvanced — structured multi-criteria search.
+// Delegates the heavy lifting to ApplyAdvancedFilters; this handler just
+// owns the per-entity whitelist, the Preload, the Order, and pagination.
+func SearchShareholdersAdvanced(c *gin.Context) {
+	var input AdvSearchInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	offset := NormalizePaging(&input)
+
+	query := database.DB.Model(&models.Shareholder{}).Preload("Address")
+	query = ApplyAdvancedFilters(query, input.Filters, shareholderFieldType)
+
+	var total int64
+	query.Count(&total)
+	var shareholders []models.Shareholder
+	query.Offset(offset).Limit(input.PageSize).Order("id DESC").Find(&shareholders)
+
+	c.JSON(http.StatusOK, gin.H{
+		"data":      shareholders,
+		"total":     total,
+		"page":      input.Page,
+		"page_size": input.PageSize,
 	})
 }
 

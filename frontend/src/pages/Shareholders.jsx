@@ -1,13 +1,49 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   Table, Button, Modal, Form, Input, Select, DatePicker, Space, Tag,
   message, Typography, Row, Col, Card, Tabs, Switch, Descriptions, Popconfirm,
 } from 'antd';
-import { PlusOutlined, SearchOutlined, EditOutlined, EyeOutlined, DeleteOutlined } from '@ant-design/icons';
+import {
+  PlusOutlined, EditOutlined, EyeOutlined, DeleteOutlined, FilterOutlined,
+} from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import dayjs from 'dayjs';
-import { getShareholders, createShareholder, updateShareholder, deleteShareholder } from '../services/api';
+import {
+  getShareholders, createShareholder, updateShareholder, deleteShareholder,
+  searchShareholdersAdvanced,
+} from '../services/api';
 import { shareholderTypes } from '../utils/format';
+import AdvancedSearchPanel from '../components/AdvancedSearchPanel';
+
+// Whitelist of searchable fields, paired with their semantic type. The backend
+// uses an identical whitelist — sending any other field is silently ignored.
+const SH_FIELDS = [
+  { key: 'id',                 label: 'Shareholder ID',         type: 'int' },
+  { key: 'account_no',         label: 'Account No',             type: 'string' },
+  { key: 'first_name',         label: 'First Name',             type: 'string' },
+  { key: 'middle_name',        label: 'Middle Name',            type: 'string' },
+  { key: 'last_name',          label: 'Last Name',              type: 'string' },
+  { key: 'first_name_am',      label: 'First Name (Amharic)',   type: 'string' },
+  { key: 'middle_name_am',     label: 'Middle Name (Amharic)',  type: 'string' },
+  { key: 'last_name_am',       label: 'Last Name (Amharic)',    type: 'string' },
+  { key: 'tin',                label: 'TIN',                    type: 'string' },
+  { key: 'national_id_no',     label: 'National ID',            type: 'string' },
+  { key: 'passport_no',        label: 'Passport No',            type: 'string' },
+  { key: 'shareholder_type',   label: 'Type',                   type: 'enum', options: shareholderTypes },
+  { key: 'gender',             label: 'Gender',                 type: 'enum', options: [{value:'male',label:'Male'},{value:'female',label:'Female'}] },
+  { key: 'status',             label: 'Status',                 type: 'enum', options: [{value:'active',label:'Active'},{value:'dormant',label:'Dormant'}] },
+  { key: 'nationality',        label: 'Nationality',            type: 'string' },
+  { key: 'phone',              label: 'Phone',                  type: 'string' },
+  { key: 'phone2',             label: 'Phone 2',                type: 'string' },
+  { key: 'phone3',             label: 'Phone 3',                type: 'string' },
+  { key: 'email',              label: 'Email',                  type: 'string' },
+  { key: 'is_staff',           label: 'Is Staff',               type: 'bool' },
+  { key: 'is_foreign',         label: 'Is Foreign',             type: 'bool' },
+  { key: 'citizenship_status', label: 'Citizenship Status',     type: 'string' },
+  { key: 'date_of_birth',      label: 'Date of Birth',          type: 'date' },
+  { key: 'created_at',         label: 'Registration Date',      type: 'date' },
+];
+
 
 const { Title } = Typography;
 
@@ -23,7 +59,11 @@ export default function Shareholders() {
   const [form] = Form.useForm();
   const navigate = useNavigate();
 
-  const fetchData = async () => {
+  // Advanced search: activeFilters is non-null when a search is in effect.
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [activeFilters, setActiveFilters] = useState(null);
+
+  const fetchSimple = useCallback(async () => {
     setLoading(true);
     try {
       const { data } = await getShareholders({ page, page_size: 20, search, type: typeFilter });
@@ -33,9 +73,38 @@ export default function Shareholders() {
       message.error('Failed to load shareholders');
     }
     setLoading(false);
+  }, [page, search, typeFilter]);
+
+  const fetchAdvanced = useCallback(async (filters) => {
+    setLoading(true);
+    try {
+      const { data } = await searchShareholdersAdvanced({ filters, page, page_size: 20 });
+      setShareholders(data.data || []);
+      setTotal(data.total || 0);
+    } catch (err) {
+      message.error(err.response?.data?.error || 'Search failed');
+    }
+    setLoading(false);
+  }, [page]);
+
+  useEffect(() => {
+    if (activeFilters) fetchAdvanced(activeFilters);
+    else fetchSimple();
+  }, [activeFilters, fetchAdvanced, fetchSimple]);
+
+  const runAdvancedSearch = (cleaned) => {
+    if (cleaned.length === 0) {
+      message.warning('Add at least one complete filter (field + operator + value).');
+      return;
+    }
+    setPage(1);
+    setActiveFilters(cleaned);
   };
 
-  useEffect(() => { fetchData(); }, [page, search, typeFilter]);
+  const resetAdvancedSearch = () => {
+    setActiveFilters(null);
+    setPage(1);
+  };
 
   const handleSubmit = async (values) => {
     try {
@@ -61,7 +130,7 @@ export default function Shareholders() {
       setModalOpen(false);
       form.resetFields();
       setEditing(null);
-      fetchData();
+      if (activeFilters) fetchAdvanced(activeFilters); else fetchSimple();
     } catch (err) {
       message.error(err.response?.data?.error || 'Operation failed');
     }
@@ -91,10 +160,11 @@ export default function Shareholders() {
   const handleDelete = async (id) => {
     await deleteShareholder(id);
     message.success('Deleted');
-    fetchData();
+    if (activeFilters) fetchAdvanced(activeFilters); else fetchSimple();
   };
 
   const columns = [
+    { title: 'Sh. ID', dataIndex: 'id', key: 'id', width: 75 },
     { title: 'Account No', dataIndex: 'account_no', key: 'account_no', width: 120 },
     {
       title: 'Name', key: 'name', render: (_, r) =>
@@ -132,12 +202,13 @@ export default function Shareholders() {
         </Button>
       </Row>
 
-      <Row gutter={16} style={{ marginBottom: 16 }}>
+      <Row gutter={16} style={{ marginBottom: 16 }} align="middle">
         <Col span={8}>
           <Input.Search
             placeholder="Search name, account, TIN..."
             onSearch={(v) => { setSearch(v); setPage(1); }}
             allowClear
+            disabled={!!activeFilters}
           />
         </Col>
         <Col span={4}>
@@ -147,9 +218,31 @@ export default function Shareholders() {
             style={{ width: '100%' }}
             options={shareholderTypes}
             onChange={(v) => { setTypeFilter(v || ''); setPage(1); }}
+            disabled={!!activeFilters}
           />
         </Col>
+        <Col span={6}>
+          <Button
+            icon={<FilterOutlined />}
+            type={advancedOpen ? 'primary' : 'default'}
+            onClick={() => setAdvancedOpen(o => !o)}
+          >
+            {advancedOpen ? 'Hide Advanced Search' : 'Advanced Search'}
+          </Button>
+          {activeFilters && (
+            <Tag color="blue" closable onClose={resetAdvancedSearch} style={{ marginLeft: 8 }}>
+              {activeFilters.length} filter{activeFilters.length === 1 ? '' : 's'} applied
+            </Tag>
+          )}
+        </Col>
       </Row>
+
+      <AdvancedSearchPanel
+        fields={SH_FIELDS}
+        open={advancedOpen}
+        onSearch={runAdvancedSearch}
+        onReset={resetAdvancedSearch}
+      />
 
       <Table
         dataSource={shareholders}
@@ -352,3 +445,4 @@ export default function Shareholders() {
     </div>
   );
 }
+

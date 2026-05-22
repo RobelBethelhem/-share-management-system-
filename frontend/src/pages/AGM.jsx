@@ -68,6 +68,7 @@ export default function AGM() {
   };
 
   const columns = [
+    { title: 'Sh. ID', key: 'shid', width: 75, render: (_, r) => r.shareholder_id ?? r.shareholder?.id ?? '-' },
     { title: 'Shareholder', key: 'sh', render: (_, r) => r.shareholder ? `${r.shareholder.first_name} ${r.shareholder.last_name}` : '-' },
     { title: 'AGM Year', dataIndex: 'agm_year', width: 100 },
     { title: 'Date', dataIndex: 'agm_date', render: (d) => d ? dayjs(d).format('YYYY-MM-DD') : '-' },

@@ -38,6 +38,13 @@ export const getDashboard = () => api.get('/dashboard');
 export const getShareholders = (params) => api.get('/shareholders', { params });
 export const getShareholder = (id) => api.get(`/shareholders/${id}`);
 export const searchShareholders = (q) => api.get('/shareholders/search', { params: { q } });
+export const searchShareholdersAdvanced  = (data) => api.post('/shareholders/search-advanced', data);
+export const searchInvestmentsAdvanced   = (data) => api.post('/investments/search-advanced', data);
+export const searchSubscriptionsAdvanced = (data) => api.post('/subscriptions/search-advanced', data);
+export const searchTransfersAdvanced     = (data) => api.post('/transfers/search-advanced', data);
+export const searchShareBlocksAdvanced   = (data) => api.post('/share-blocks/search-advanced', data);
+export const searchCertificatesAdvanced  = (data) => api.post('/certificates/search-advanced', data);
+export const searchAllocationsAdvanced   = (data) => api.post('/allocations/search-advanced', data);
 export const createShareholder = (data) => api.post('/shareholders', data);
 export const updateShareholder = (id, data) => api.put(`/shareholders/${id}`, data);
 export const deleteShareholder = (id) => api.delete(`/shareholders/${id}`);
@@ -56,6 +63,28 @@ export const preSubscribe = (data) => api.post('/subscriptions/pre-subscribe', d
 export const getAllocations = (params) => api.get('/allocations', { params });
 export const createAllocation = (data) => api.post('/allocations', data);
 export const allocateFromSubscriptions = (data) => api.post('/allocations/from-subscriptions', data);
+
+// Capital Increase Share Allocation
+export const getCapitalIncreases = (params) => api.get('/capital-increases', { params });
+export const getCapitalIncrease = (id) => api.get(`/capital-increases/${id}`);
+export const createCapitalIncrease = (data) => api.post('/capital-increases', data);
+export const updateCapitalIncrease = (id, data) => api.put(`/capital-increases/${id}`, data);
+export const startCapitalIncrease = (id) => api.post(`/capital-increases/${id}/start`);
+export const previewCIRound = (id, round) => api.get(`/capital-increases/${id}/rounds/${round}/preview`);
+export const runCIRound = (id, round) => api.post(`/capital-increases/${id}/run-round`, { round });
+export const confirmCISubscription = (id, subId, data) => api.post(`/capital-increases/${id}/subscriptions/${subId}/confirm`, data || {});
+export const reverseCISubscription = (id, subId) => api.post(`/capital-increases/${id}/subscriptions/${subId}/reverse`);
+export const closeCIRound = (id, round) => api.post(`/capital-increases/${id}/close-round`, { round });
+export const openCIAdditional = (id) => api.post(`/capital-increases/${id}/open-additional`);
+export const closeCapitalIncrease = (id) => api.post(`/capital-increases/${id}/close`);
+export const deleteCapitalIncrease = (id) => api.delete(`/capital-increases/${id}`);
+export const getCISubscriptions = (id, params) => api.get(`/capital-increases/${id}/subscriptions`, { params });
+export const getCISummary = (id) => api.get(`/capital-increases/${id}/summary`);
+export const getCIAdditionalRequests = (id) => api.get(`/capital-increases/${id}/additional-requests`);
+export const listAllCIAdditionalRequests = (params) => api.get('/ci-additional-requests', { params });
+export const createCIAdditionalRequest = (id, data) => api.post(`/capital-increases/${id}/additional-requests`, data);
+export const approveCIAdditionalRequest = (id, reqId, data) => api.post(`/capital-increases/${id}/additional-requests/${reqId}/approve`, data);
+export const rejectCIAdditionalRequest = (id, reqId) => api.post(`/capital-increases/${id}/additional-requests/${reqId}/reject`);
 
 // Investments
 export const getInvestments = (params) => api.get('/investments', { params });
@@ -76,6 +105,7 @@ export const getDividendSettings = () => api.get('/dividend-settings');
 export const createDividendSetting = (data) => api.post('/dividend-settings', data);
 export const updateDividendSetting = (id, data) => api.put(`/dividend-settings/${id}`, data);
 export const processDividend = (id) => api.post(`/dividend-settings/${id}/process`);
+export const deleteDividendSetting = (id) => api.delete(`/dividend-settings/${id}`);
 export const getDPSSummary = () => api.get('/dividend-settings/dps-summary');
 
 // Dividends
@@ -86,6 +116,9 @@ export const releaseDividend = (id) => api.post(`/dividends/${id}/release`);
 export const transferDividend = (id, data) => api.post(`/dividends/${id}/transfer`, data);
 export const returnDividendTax = (id) => api.post(`/dividends/${id}/tax-return`);
 export const returnDividendPayment = (id) => api.post(`/dividends/${id}/payment-return`);
+export const reinvestDividend = (id, data) => api.post(`/dividends/${id}/reinvest`, data);
+export const getDividendBreakdown = (id) => api.get(`/dividends/${id}/breakdown`);
+export const getDividendHistory = (id) => api.get(`/dividends/${id}/history`);
 
 // Dividend Tax Schedules
 export const getDividendTaxSchedules = () => api.get('/dividend-tax-schedules');

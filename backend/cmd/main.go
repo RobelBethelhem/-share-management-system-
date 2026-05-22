@@ -144,6 +144,13 @@ func main() {
 		// Shareholders
 		api.GET("/shareholders", handlers.GetShareholders)
 		api.GET("/shareholders/search", handlers.SearchShareholders)
+		api.POST("/shareholders/search-advanced", handlers.SearchShareholdersAdvanced)
+		api.POST("/investments/search-advanced", handlers.SearchInvestmentsAdvanced)
+		api.POST("/subscriptions/search-advanced", handlers.SearchSubscriptionsAdvanced)
+		api.POST("/transfers/search-advanced", handlers.SearchTransfersAdvanced)
+		api.POST("/share-blocks/search-advanced", handlers.SearchShareBlocksAdvanced)
+		api.POST("/certificates/search-advanced", handlers.SearchCertificatesAdvanced)
+		api.POST("/allocations/search-advanced", handlers.SearchAllocationsAdvanced)
 		api.GET("/shareholders/:id", handlers.GetShareholder)
 		api.POST("/shareholders", handlers.CreateShareholder)
 		api.PUT("/shareholders/:id", handlers.UpdateShareholder)
@@ -168,6 +175,29 @@ func main() {
 		api.PUT("/allocations/:id", handlers.UpdateAllocation)
 		api.POST("/allocations/from-subscriptions", handlers.AllocateFromSubscriptions)
 
+		// Capital Increase — proportional multi-round share allocation.
+		// Read endpoints are open to any logged-in user; mutations require admin.
+		api.GET("/capital-increases", handlers.GetCapitalIncreases)
+		api.GET("/capital-increases/:id", handlers.GetCapitalIncrease)
+		api.GET("/capital-increases/:id/summary", handlers.GetCISummary)
+		api.GET("/capital-increases/:id/subscriptions", handlers.GetCISubscriptions)
+		api.GET("/capital-increases/:id/rounds/:round/preview", middleware.AdminOnly(), handlers.PreviewCIRound)
+		api.GET("/capital-increases/:id/additional-requests", handlers.GetCIAdditionalRequests)
+		api.GET("/ci-additional-requests", handlers.ListAllCIAdditionalRequests)
+		api.POST("/capital-increases", middleware.AdminOnly(), handlers.CreateCapitalIncrease)
+		api.PUT("/capital-increases/:id", middleware.AdminOnly(), handlers.UpdateCapitalIncrease)
+		api.POST("/capital-increases/:id/start", middleware.AdminOnly(), handlers.StartCapitalIncrease)
+		api.POST("/capital-increases/:id/run-round", middleware.AdminOnly(), handlers.RunCIRound)
+		api.POST("/capital-increases/:id/subscriptions/:subId/confirm", middleware.AdminOnly(), handlers.ConfirmCISubscription)
+		api.POST("/capital-increases/:id/subscriptions/:subId/reverse", middleware.AdminOnly(), handlers.ReverseCISubscription)
+		api.POST("/capital-increases/:id/close-round", middleware.AdminOnly(), handlers.CloseCIRound)
+		api.POST("/capital-increases/:id/open-additional", middleware.AdminOnly(), handlers.OpenCIAdditional)
+		api.POST("/capital-increases/:id/close", middleware.AdminOnly(), handlers.CloseCapitalIncrease)
+		api.DELETE("/capital-increases/:id", middleware.AdminOnly(), handlers.DeleteCapitalIncrease)
+		api.POST("/capital-increases/:id/additional-requests", handlers.CreateCIAdditionalRequest)
+		api.POST("/capital-increases/:id/additional-requests/:reqId/approve", middleware.AdminOnly(), handlers.ApproveCIAdditionalRequest)
+		api.POST("/capital-increases/:id/additional-requests/:reqId/reject", middleware.AdminOnly(), handlers.RejectCIAdditionalRequest)
+
 		// Investments
 		api.GET("/investments", handlers.GetInvestments)
 		api.GET("/investments/:id", handlers.GetInvestment)
@@ -187,16 +217,21 @@ func main() {
 		api.POST("/dividend-settings", handlers.CreateDividendSetting)
 		api.PUT("/dividend-settings/:id", handlers.UpdateDividendSetting)
 		api.POST("/dividend-settings/:id/process", handlers.ProcessDividend)
+		api.DELETE("/dividend-settings/:id", middleware.AdminOnly(), handlers.DeleteDividendSetting)
 		api.GET("/dividend-settings/dps-summary", handlers.GetDPSSummary)
 
 		// Dividends
 		api.GET("/dividends", handlers.GetDividends)
+		api.GET("/dividends/:id", handlers.GetDividend)
 		api.POST("/dividends/:id/collect", handlers.CollectDividend)
 		api.POST("/dividends/:id/block", handlers.BlockDividend)
 		api.POST("/dividends/:id/release", handlers.ReleaseDividend)
 		api.POST("/dividends/:id/transfer", handlers.TransferDividend)
 		api.POST("/dividends/:id/tax-return", handlers.ReturnDividendTax)
 		api.POST("/dividends/:id/payment-return", handlers.ReturnDividendPayment)
+		api.POST("/dividends/:id/reinvest", handlers.ReinvestDividend)
+		api.GET("/dividends/:id/breakdown", handlers.GetDividendBreakdown)
+		api.GET("/dividends/:id/history", handlers.GetDividendHistory)
 
 		// Dividend Tax Schedules
 		api.GET("/dividend-tax-schedules", handlers.GetDividendTaxSchedules)

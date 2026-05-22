@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
-  Card, Descriptions, Table, Tag, Tabs, Spin, Button, Row, Col, Statistic, Typography, Space,
+  Card, Descriptions, Table, Tag, Tooltip, Tabs, Spin, Button, Row, Col, Statistic, Typography, Space,
 } from 'antd';
 import { ArrowLeftOutlined } from '@ant-design/icons';
 import { getShareholder } from '../services/api';
@@ -31,7 +31,13 @@ export default function ShareholderDetail() {
     { title: 'Method', dataIndex: 'payment_method' },
     { title: 'Amount', dataIndex: 'amount', render: (v) => formatCurrency(v) },
     { title: 'Shares', dataIndex: 'number_of_shares', render: (v) => formatNumber(v) },
-    { title: 'Status', dataIndex: 'approval_status', render: (s) => <Tag color={s === 'approved' ? 'green' : 'orange'}>{s}</Tag> },
+    { title: 'Status', dataIndex: 'approval_status', render: (s, r) => {
+      const color = s === 'approved' ? 'green' : s === 'rejected' ? 'red' : 'orange';
+      const tag = <Tag color={color}>{s}</Tag>;
+      return s === 'rejected' && r.rejection_reason
+        ? <Tooltip title={r.rejection_reason} placement="left">{tag}</Tooltip>
+        : tag;
+    } },
   ];
 
   const subscriptionColumns = [

@@ -123,6 +123,12 @@ type Subscription struct {
 	IsProportional  bool           `gorm:"default:false" json:"is_proportional"`
 	Remark          string         `gorm:"type:text" json:"remark"`
 	ApprovalStatus  string         `gorm:"size:30;default:'pending'" json:"approval_status"`
+	RejectionReason string         `gorm:"type:text" json:"rejection_reason"`
+	// Capital Increase fields (nullable — legacy rows have CapitalIncreaseID = nil)
+	CapitalIncreaseID      *uint      `gorm:"index" json:"capital_increase_id"`
+	Round                  int        `gorm:"default:0" json:"round"`
+	ShareholderConfirmedAt *time.Time `json:"shareholder_confirmed_at"`
+	BaseShares             int64      `gorm:"default:0" json:"base_shares"`
 	CreatedAt       time.Time      `json:"created_at"`
 	UpdatedAt       time.Time      `json:"updated_at"`
 	DeletedAt       gorm.DeletedAt `gorm:"index" json:"-"`
@@ -142,6 +148,8 @@ type Allocation struct {
 	AllocationDate  *time.Time `json:"allocation_date"`
 	Status          string     `gorm:"size:30;default:'pending'" json:"status"`
 	ApprovalStatus  string     `gorm:"size:30;default:'pending'" json:"approval_status"`
+	// Capital Increase FK — nullable so existing allocations stay untouched
+	CapitalIncreaseID *uint     `gorm:"index" json:"capital_increase_id"`
 	CreatedAt       time.Time  `json:"created_at"`
 	UpdatedAt       time.Time  `json:"updated_at"`
 
@@ -167,6 +175,7 @@ type Investment struct {
 	Remark           string     `gorm:"type:text" json:"remark"`
 	Status           string     `gorm:"size:30;default:'active'" json:"status"`
 	ApprovalStatus   string     `gorm:"size:30;default:'pending'" json:"approval_status"`
+	RejectionReason  string     `gorm:"type:text" json:"rejection_reason"`
 	AllocationID     *uint      `gorm:"index" json:"allocation_id"`
 	CreatedAt        time.Time  `json:"created_at"`
 	UpdatedAt        time.Time  `json:"updated_at"`
@@ -198,6 +207,7 @@ type Transfer struct {
 	Reason             string     `gorm:"type:text" json:"reason"`
 	Status             string     `gorm:"size:30;default:'pending'" json:"status"`
 	ApprovalStatus     string     `gorm:"size:30;default:'pending'" json:"approval_status"`
+	RejectionReason    string     `gorm:"type:text" json:"rejection_reason"`
 	FromAllocationID   *uint      `gorm:"index" json:"from_allocation_id"`
 	CreatedAt          time.Time  `json:"created_at"`
 	UpdatedAt          time.Time  `json:"updated_at"`
@@ -261,6 +271,7 @@ type Dividend struct {
 	NetDividend       float64    `gorm:"type:decimal(18,2)" json:"net_dividend"`
 	CollectedAmount   float64    `gorm:"type:decimal(18,2);default:0" json:"collected_amount"`
 	UncollectedAmount float64    `gorm:"type:decimal(18,2)" json:"uncollected_amount"`
+	ReinvestedAmount  float64    `gorm:"type:decimal(18,2);default:0" json:"reinvested_amount"`
 	PaymentMethod     string     `gorm:"size:50" json:"payment_method"`
 	CollectionDate    *time.Time `json:"collection_date"`
 	IsBlocked         bool       `gorm:"default:false" json:"is_blocked"`
@@ -273,11 +284,33 @@ type Dividend struct {
 	Remark            string     `gorm:"type:text" json:"remark"`
 	Status            string     `gorm:"size:30;default:'pending'" json:"status"`
 	ApprovalStatus    string     `gorm:"size:30;default:'pending'" json:"approval_status"`
+	RejectionReason   string     `gorm:"type:text" json:"rejection_reason"`
 	CreatedAt         time.Time  `json:"created_at"`
 	UpdatedAt         time.Time  `json:"updated_at"`
 
 	Shareholder     Shareholder     `gorm:"foreignKey:ShareholderID" json:"shareholder,omitempty"`
 	DividendSetting DividendSetting `gorm:"foreignKey:DividendSettingID" json:"dividend_setting,omitempty"`
+}
+
+// DividendAction is the append-only audit log of everything that happens to a
+// dividend after it's been processed (collect, block, release, transfer,
+// reinvest, tax/payment return, etc.). Each action links to the parent
+// Dividend and optionally to whatever entity it produced (Investment for
+// reinvest, Transfer for transfer, etc.).
+type DividendAction struct {
+	ID            uint      `gorm:"primaryKey" json:"id"`
+	DividendID    uint      `gorm:"index;not null" json:"dividend_id"`
+	ActionType    string    `gorm:"size:30;not null" json:"action_type"` // collect, block, release, transfer, reinvest, tax_return, payment_return
+	Amount        float64   `gorm:"type:decimal(18,2)" json:"amount"`
+	TaxImpact     float64   `gorm:"type:decimal(18,2);default:0" json:"tax_impact"` // tax recalculated for this action (negative = tax reduction)
+	Description   string    `gorm:"size:500" json:"description"`
+	InvestmentID  *uint     `gorm:"index" json:"investment_id"`
+	TransferID    *uint     `gorm:"index" json:"transfer_id"`
+	PaymentMethod string    `gorm:"size:50" json:"payment_method"`
+	Remark        string    `gorm:"type:text" json:"remark"`
+	ActedByUserID uint      `gorm:"index" json:"acted_by_user_id"`
+	ActedAt       time.Time `json:"acted_at"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // ShareBlock represents share blocking/freezing
@@ -295,6 +328,7 @@ type ShareBlock struct {
 	IsReleased      bool       `gorm:"default:false" json:"is_released"`
 	Status          string     `gorm:"size:30;default:'active'" json:"status"`
 	ApprovalStatus  string     `gorm:"size:30;default:'pending'" json:"approval_status"`
+	RejectionReason string     `gorm:"type:text" json:"rejection_reason"`
 	AllocationID        *uint      `gorm:"index" json:"allocation_id"`
 	SharesType          string     `gorm:"size:20;default:'both'" json:"shares_type"` // paid, unpaid, both
 	PaidSharesToBlock   int64      `gorm:"default:0" json:"paid_shares_to_block"`     // explicit paid portion (set by backend)
@@ -368,6 +402,7 @@ type AGMProxy struct {
 	ProxyIDNo     string    `gorm:"size:50" json:"proxy_id_no"`
 	ProxyCode     string    `gorm:"size:10;uniqueIndex" json:"proxy_code"`
 	Status        string    `gorm:"size:20;default:'active'" json:"status"` // active, revoked, used
+	RejectionReason string  `gorm:"type:text" json:"rejection_reason"`
 	CreatedAt     time.Time `json:"created_at"`
 
 	Shareholder Shareholder `gorm:"foreignKey:ShareholderID" json:"shareholder,omitempty"`
@@ -533,6 +568,7 @@ type TradeRequest struct {
 	PricePerShare  float64    `gorm:"type:decimal(18,2);not null" json:"price_per_share"`
 	TotalValue     float64    `gorm:"type:decimal(18,2);not null" json:"total_value"`
 	Status         string     `gorm:"size:30;default:'pending'" json:"status"` // pending, approved, rejected, completed
+	RejectionReason string    `gorm:"type:text" json:"rejection_reason"`
 	TransferID     *uint      `json:"transfer_id"`
 	CreatedAt      time.Time  `json:"created_at"`
 	UpdatedAt      time.Time  `json:"updated_at"`
@@ -790,4 +826,50 @@ type MiniAppSetting struct {
 	MiniAppID   uint   `gorm:"index;not null" json:"mini_app_id"`
 	ConfigKey   string `gorm:"size:100;not null" json:"config_key"`
 	ConfigValue string `gorm:"type:text" json:"config_value"`
+}
+
+// ============================================================
+// Capital Increase Share Allocation
+// ============================================================
+
+// CapitalIncrease represents one issuance of new shares to existing shareholders,
+// distributed proportionally across multiple whole-number rounds.
+type CapitalIncrease struct {
+	ID              uint       `gorm:"primaryKey" json:"id"`
+	Label           string     `gorm:"size:200;not null" json:"label"`
+	TotalNewShares  int64      `gorm:"not null" json:"total_new_shares"`
+	ParValue        float64    `gorm:"type:decimal(18,2);not null" json:"par_value"`
+	MaxAutoRounds   int        `gorm:"default:3" json:"max_auto_rounds"`
+	CurrentRound    int        `gorm:"default:0" json:"current_round"`
+	AllocatedShares int64      `gorm:"default:0" json:"allocated_shares"`
+	Status          string     `gorm:"size:30;default:'draft'" json:"status"` // draft, round_open, additional_open, closed
+	Remark          string     `gorm:"type:text" json:"remark"`
+	StartedAt       *time.Time `json:"started_at"`
+	ClosedAt        *time.Time `json:"closed_at"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
+// CIAdditionalRequest is a shareholder's request for more shares.
+// In the iterative flow, requests are created during a round's confirmation
+// phase and then capped against the shareholder's allocation in the next round.
+// FulfilledShares is incremented every time a confirmation eats into the request.
+// Status flows: pending → partial → fulfilled, or pending → expired/rejected.
+// (approved/rejected remain available for the standalone admin-managed phase
+// that runs after MaxAutoRounds is exhausted.)
+type CIAdditionalRequest struct {
+	ID                uint      `gorm:"primaryKey" json:"id"`
+	CapitalIncreaseID uint      `gorm:"index;not null" json:"capital_increase_id"`
+	ShareholderID     uint      `gorm:"index;not null" json:"shareholder_id"`
+	Round             int       `gorm:"default:0" json:"round"` // round whose confirmation phase produced this request
+	RequestedShares   int64     `gorm:"not null" json:"requested_shares"`
+	FulfilledShares   int64     `gorm:"default:0" json:"fulfilled_shares"` // running count of confirmed-against shares
+	ApprovedShares    int64     `gorm:"default:0" json:"approved_shares"`  // manual admin approval (post-MaxAutoRounds path)
+	Status            string    `gorm:"size:20;default:'pending'" json:"status"`
+	Note              string    `gorm:"size:500" json:"note"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+
+	Shareholder     Shareholder     `gorm:"foreignKey:ShareholderID" json:"shareholder,omitempty"`
+	CapitalIncrease CapitalIncrease `gorm:"foreignKey:CapitalIncreaseID" json:"capital_increase,omitempty"`
 }

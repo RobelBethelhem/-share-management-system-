@@ -249,13 +249,25 @@ func CreateTransfer(c *gin.Context) {
 	}
 
 	if transfer.ParValue > 0 {
-		transferValue := float64(transfer.NumberOfShares) * transfer.ParValue
-		transfer.TransferAmount = transferValue
-		transfer.CapitalGainTax = transferValue * 0.15
-		transfer.ServiceFee = transferValue * 0.01
-		transfer.StampDuty = transferValue * 0.005
-		transfer.VAT = transfer.ServiceFee * 0.15
-		transfer.TotalFees = transfer.CapitalGainTax + transfer.ServiceFee + transfer.StampDuty + transfer.VAT
+		// Reuse the same fee policy as the preview endpoint so the stored
+		// numbers exactly match what the admin saw before clicking Create.
+		// Pass through lines so cost basis is read per-allocation; falls back
+		// to FromAllocationID, then BankCapital par if neither is provided.
+		feeLines := make([]calcFeeLineInput, 0, len(input.Lines))
+		for _, l := range input.Lines {
+			feeLines = append(feeLines, calcFeeLineInput{
+				FromAllocationID:       l.FromAllocationID,
+				PaidSharesToTransfer:   l.PaidSharesToTransfer,
+				UnpaidSharesToTransfer: l.UnpaidSharesToTransfer,
+			})
+		}
+		b := computeTransferFees(transfer.NumberOfShares, transfer.ParValue, transfer.FromAllocationID, feeLines)
+		transfer.TransferAmount = b.TransferValue
+		transfer.CapitalGainTax = b.CapitalGainTax
+		transfer.ServiceFee = b.ServiceFee
+		transfer.StampDuty = b.StampDuty
+		transfer.VAT = b.VAT
+		transfer.TotalFees = b.TotalFees
 	}
 
 	now := time.Now()
@@ -388,7 +400,11 @@ func RunTransferApproval(transferID uint) error {
 				Round:           inheritRound,
 				AllocatedShares: totalShares,
 				AllocatedAmount: float64(totalShares) * transfer.ParValue,
-				AllocationDate:  &now,
+				// The transferee's dividend-eligibility clock starts at the agreed
+				// dividend date (or transfer approval time if no agreed date) —
+				// not at `now`. This is what the weighted-average breakdown reads
+				// to compute days_held for the new owner.
+				AllocationDate:  dividendDate,
 				Status:          "allocated",
 				ApprovalStatus:  "approved",
 			}
@@ -488,22 +504,61 @@ func RejectTransfer(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Transfer rejected"})
 }
 
-func CalculateTransferFees(c *gin.Context) {
-	var input struct {
-		NumberOfShares int64   `json:"number_of_shares" binding:"required"`
-		ParValue       float64 `json:"par_value" binding:"required"`
-		PricePerShare  float64 `json:"price_per_share"`
-	}
-	if err := c.ShouldBindJSON(&input); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
+// calcFeeLineInput models one source-allocation line for the fee calculator.
+// Used by both the preview endpoint (CalculateTransferFees) and the save path
+// (CreateTransfer) — the two callers share the same helper below so the
+// numbers the admin sees in the preview are exactly what gets persisted.
+type calcFeeLineInput struct {
+	FromAllocationID       uint  `json:"from_allocation_id"`
+	PaidSharesToTransfer   int64 `json:"paid_shares_to_transfer"`
+	UnpaidSharesToTransfer int64 `json:"unpaid_shares_to_transfer"`
+}
 
-	if input.PricePerShare <= 0 {
-		input.PricePerShare = input.ParValue
-	}
+// transferFeeBreakdown is the structured output of computeTransferFees.
+// Field names mirror the JSON keys the frontend already consumes.
+type transferFeeBreakdown struct {
+	TransferValue          float64
+	CostBasisPerShare      float64
+	SellingPricePerShare   float64
+	GainPerShare           float64
+	CapitalGain            float64
+	CapitalGainTax         float64
+	CapitalGainTaxRate     float64
+	ServiceFee             float64
+	ServiceFeeRate         float64
+	ServiceFeeMin          float64
+	ServiceFeeMax          float64
+	ServiceFeeFloorApplied bool
+	ServiceFeeCapApplied   bool
+	LowSharesThreshold     int64
+	StampDuty              float64
+	StampDutyType          string
+	StampDutyRate          float64
+	StampDutyAmount        float64
+	VAT                    float64
+	VATRate                float64
+	TotalFees              float64
+	LineCosts              []map[string]interface{}
+}
 
-	transferValue := float64(input.NumberOfShares) * input.PricePerShare
+// computeTransferFees encapsulates the full fee policy. Single source of
+// truth — used for both preview and persistence.
+//
+//   - Stamp duty: dispatches on transfer_stamp_duty_type (fixed | percent).
+//     fixed mode applies transfer_stamp_duty_amount (a flat ETB number);
+//     percent mode applies transfer_stamp_duty_rate × transfer value.
+//
+//   - Service fee: base = rate × transfer_value, then floor it at
+//     transfer_service_fee_min_low_shares whenever shares < threshold (default
+//     1,000 ETB minimum for transfers < 100 shares), then cap at
+//     transfer_service_fee_max (default 20,000 ETB).
+//
+//   - CGT: 15% × max(0, selling - cost basis) × shares. cost basis is the
+//     seller's per-share buying price, weighted across lines from the
+//     source Allocation's AllocatedAmount/AllocatedShares.
+func computeTransferFees(numberOfShares int64, pricePerShare float64, fromAllocationID *uint, lines []calcFeeLineInput) transferFeeBreakdown {
+	out := transferFeeBreakdown{SellingPricePerShare: pricePerShare}
+	out.TransferValue = float64(numberOfShares) * pricePerShare
 
 	getRate := func(key string, fallback float64) float64 {
 		var s models.SystemSetting
@@ -514,29 +569,152 @@ func CalculateTransferFees(c *gin.Context) {
 		}
 		return fallback
 	}
+	getStr := func(key, fallback string) string {
+		var s models.SystemSetting
+		if err := database.DB.Where("`key` = ?", key).First(&s).Error; err == nil && s.Value != "" {
+			return s.Value
+		}
+		return fallback
+	}
 
 	capitalGainRate := getRate("capital_gain_tax_rate", 15) / 100
 	serviceFeeRate := getRate("transfer_service_fee_rate", 1) / 100
-	stampDutyRate := getRate("transfer_stamp_duty_rate", 0.5) / 100
 	vatRate := getRate("transfer_vat_rate", 15) / 100
 
-	capitalGainTax := transferValue * capitalGainRate
-	serviceFee := transferValue * serviceFeeRate
-	stampDuty := transferValue * stampDutyRate
-	vat := serviceFee * vatRate
-	total := capitalGainTax + serviceFee + stampDuty + vat
+	stampDutyType := getStr("transfer_stamp_duty_type", "fixed")
+	stampDutyAmount := getRate("transfer_stamp_duty_amount", 5)
+	stampDutyRate := getRate("transfer_stamp_duty_rate", 0.5) / 100
 
+	serviceFeeMin := getRate("transfer_service_fee_min_low_shares", 1000)
+	serviceFeeMax := getRate("transfer_service_fee_max", 20000)
+	lowSharesThreshold := int64(getRate("transfer_service_fee_low_shares_threshold", 100))
+
+	// Cost basis fallback = company par from BankCapital
+	companyPar := 0.0
+	var bc models.BankCapital
+	if err := database.DB.First(&bc).Error; err == nil && bc.ParValuePerShare > 0 {
+		companyPar = bc.ParValuePerShare
+	}
+	costBasis := companyPar
+
+	if len(lines) > 0 {
+		var totalShares int64
+		var weightedSum float64
+		for _, ln := range lines {
+			shares := ln.PaidSharesToTransfer + ln.UnpaidSharesToTransfer
+			if shares <= 0 || ln.FromAllocationID == 0 {
+				continue
+			}
+			var alloc models.Allocation
+			if err := database.DB.First(&alloc, ln.FromAllocationID).Error; err != nil {
+				continue
+			}
+			cb := companyPar
+			if alloc.AllocatedShares > 0 {
+				cb = alloc.AllocatedAmount / float64(alloc.AllocatedShares)
+			}
+			out.LineCosts = append(out.LineCosts, map[string]interface{}{
+				"allocation_id":        alloc.ID,
+				"shares":               shares,
+				"cost_basis_per_share": cb,
+			})
+			weightedSum += cb * float64(shares)
+			totalShares += shares
+		}
+		if totalShares > 0 {
+			costBasis = weightedSum / float64(totalShares)
+		}
+	} else if fromAllocationID != nil {
+		var alloc models.Allocation
+		if err := database.DB.First(&alloc, *fromAllocationID).Error; err == nil && alloc.AllocatedShares > 0 {
+			costBasis = alloc.AllocatedAmount / float64(alloc.AllocatedShares)
+			out.LineCosts = append(out.LineCosts, map[string]interface{}{
+				"allocation_id":        alloc.ID,
+				"shares":               numberOfShares,
+				"cost_basis_per_share": costBasis,
+			})
+		}
+	}
+
+	out.CostBasisPerShare = costBasis
+	out.GainPerShare = pricePerShare - costBasis
+	if out.GainPerShare < 0 {
+		out.GainPerShare = 0
+	}
+	out.CapitalGain = out.GainPerShare * float64(numberOfShares)
+	out.CapitalGainTax = out.CapitalGain * capitalGainRate
+	out.CapitalGainTaxRate = capitalGainRate * 100
+
+	// Service fee with floor + cap
+	sf := out.TransferValue * serviceFeeRate
+	if numberOfShares < lowSharesThreshold && sf < serviceFeeMin {
+		sf = serviceFeeMin
+		out.ServiceFeeFloorApplied = true
+	}
+	if sf > serviceFeeMax {
+		sf = serviceFeeMax
+		out.ServiceFeeCapApplied = true
+	}
+	out.ServiceFee = sf
+	out.ServiceFeeRate = serviceFeeRate * 100
+	out.ServiceFeeMin = serviceFeeMin
+	out.ServiceFeeMax = serviceFeeMax
+	out.LowSharesThreshold = lowSharesThreshold
+
+	if stampDutyType == "percent" {
+		out.StampDuty = out.TransferValue * stampDutyRate
+	} else {
+		out.StampDuty = stampDutyAmount
+	}
+	out.StampDutyType = stampDutyType
+	out.StampDutyRate = stampDutyRate * 100
+	out.StampDutyAmount = stampDutyAmount
+
+	out.VAT = out.ServiceFee * vatRate
+	out.VATRate = vatRate * 100
+	out.TotalFees = out.CapitalGainTax + out.ServiceFee + out.StampDuty + out.VAT
+	return out
+}
+
+func CalculateTransferFees(c *gin.Context) {
+	var input struct {
+		NumberOfShares   int64              `json:"number_of_shares" binding:"required"`
+		ParValue         float64            `json:"par_value" binding:"required"`
+		PricePerShare    float64            `json:"price_per_share"`
+		FromAllocationID *uint              `json:"from_allocation_id"`
+		Lines            []calcFeeLineInput `json:"lines"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if input.PricePerShare <= 0 {
+		input.PricePerShare = input.ParValue
+	}
+	b := computeTransferFees(input.NumberOfShares, input.PricePerShare, input.FromAllocationID, input.Lines)
 	c.JSON(http.StatusOK, gin.H{
-		"transfer_value":        transferValue,
-		"capital_gain_tax":      capitalGainTax,
-		"capital_gain_tax_rate": capitalGainRate * 100,
-		"service_fee":           serviceFee,
-		"service_fee_rate":      serviceFeeRate * 100,
-		"stamp_duty":            stampDuty,
-		"stamp_duty_rate":       stampDutyRate * 100,
-		"vat":                   vat,
-		"vat_rate":              vatRate * 100,
-		"total_fees":            total,
+		"transfer_value":            b.TransferValue,
+		"cost_basis_per_share":      b.CostBasisPerShare,
+		"selling_price_per_share":   b.SellingPricePerShare,
+		"gain_per_share":            b.GainPerShare,
+		"capital_gain":              b.CapitalGain,
+		"capital_gain_tax":          b.CapitalGainTax,
+		"capital_gain_tax_rate":     b.CapitalGainTaxRate,
+		"line_costs":                b.LineCosts,
+		"service_fee":               b.ServiceFee,
+		"service_fee_rate":          b.ServiceFeeRate,
+		"service_fee_min":           b.ServiceFeeMin,
+		"service_fee_max":           b.ServiceFeeMax,
+		"service_fee_floor_applied": b.ServiceFeeFloorApplied,
+		"service_fee_cap_applied":   b.ServiceFeeCapApplied,
+		"low_shares_threshold":      b.LowSharesThreshold,
+		"stamp_duty":                b.StampDuty,
+		"stamp_duty_type":           b.StampDutyType,
+		"stamp_duty_rate":           b.StampDutyRate,
+		"stamp_duty_amount":         b.StampDutyAmount,
+		"vat":                       b.VAT,
+		"vat_rate":                  b.VATRate,
+		"total_fees":                b.TotalFees,
 	})
 }
 

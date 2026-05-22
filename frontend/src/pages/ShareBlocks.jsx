@@ -1,16 +1,39 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   Table, Button, Modal, Form, Input, Select, DatePicker, InputNumber,
   Space, Tag, message, Typography, Row, Col, Popconfirm, Card, Statistic,
   Divider, Radio, Alert,
 } from 'antd';
-import { PlusOutlined, InfoCircleOutlined, LockOutlined } from '@ant-design/icons';
+import { PlusOutlined, InfoCircleOutlined, LockOutlined, FilterOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import {
   getShareBlocks, createShareBlock, releaseShareBlock, searchShareholders,
   getShareholders, getShareholderInvestmentSummary, getBankCapital,
+  searchShareBlocksAdvanced,
 } from '../services/api';
 import { formatCurrency, blockTypes } from '../utils/format';
+import AdvancedSearchPanel from '../components/AdvancedSearchPanel';
+
+const BLK_FIELDS = [
+  { key: 'id',                     label: 'Block ID',          type: 'int' },
+  { key: 'shareholder_id',         label: 'Shareholder ID',    type: 'int' },
+  { key: 'allocation_id',          label: 'Allocation ID',     type: 'int' },
+  { key: 'block_type',             label: 'Block Type',        type: 'enum', options: blockTypes },
+  { key: 'shares_type',            label: 'Shares Type',       type: 'enum', options: [{value:'paid',label:'Paid'},{value:'unpaid',label:'Unpaid'},{value:'both',label:'Both'}] },
+  { key: 'block_shares',           label: 'Block Shares',      type: 'int' },
+  { key: 'paid_shares_to_block',   label: 'Paid Blocked',      type: 'int' },
+  { key: 'unpaid_shares_to_block', label: 'Unpaid Blocked',    type: 'int' },
+  { key: 'block_amount_birr',      label: 'Block Amount',      type: 'number' },
+  { key: 'guarantee_amount',       label: 'Guarantee Amount',  type: 'number' },
+  { key: 'service_fee',            label: 'Service Fee',       type: 'number' },
+  { key: 'is_released',            label: 'Released',          type: 'bool' },
+  { key: 'reason',                 label: 'Reason',            type: 'string' },
+  { key: 'status',                 label: 'Status',            type: 'enum', options: [{value:'active',label:'Active'},{value:'released',label:'Released'}] },
+  { key: 'approval_status',        label: 'Approval Status',   type: 'enum', options: [{value:'pending',label:'Pending'},{value:'approved',label:'Approved'},{value:'rejected',label:'Rejected'}] },
+  { key: 'block_date',             label: 'Block Date',        type: 'date' },
+  { key: 'release_date',           label: 'Release Date',      type: 'date' },
+  { key: 'created_at',             label: 'Created Date',      type: 'date' },
+];
 
 const { Title, Text } = Typography;
 
@@ -37,7 +60,10 @@ export default function ShareBlocks() {
   // Watched form field
   const sharesType = Form.useWatch('shares_type', form) || 'both';
 
-  const fetchData = async () => {
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [activeFilters, setActiveFilters] = useState(null);
+
+  const fetchSimple = useCallback(async () => {
     setLoading(true);
     try {
       const res = await getShareBlocks({ page, page_size: 20 });
@@ -45,9 +71,31 @@ export default function ShareBlocks() {
       setTotal(res.data.total || 0);
     } catch { message.error('Failed to load'); }
     setLoading(false);
-  };
+  }, [page]);
 
-  useEffect(() => { fetchData(); }, [page]);
+  const fetchAdvanced = useCallback(async (filters) => {
+    setLoading(true);
+    try {
+      const res = await searchShareBlocksAdvanced({ filters, page, page_size: 20 });
+      setData(res.data.data || []);
+      setTotal(res.data.total || 0);
+    } catch (err) { message.error(err.response?.data?.error || 'Search failed'); }
+    setLoading(false);
+  }, [page]);
+
+  useEffect(() => {
+    if (activeFilters) fetchAdvanced(activeFilters);
+    else fetchSimple();
+  }, [activeFilters, fetchAdvanced, fetchSimple]);
+
+  const runAdvancedSearch = (cleaned) => {
+    if (cleaned.length === 0) { message.warning('Add at least one filter.'); return; }
+    setPage(1);
+    setActiveFilters(cleaned);
+  };
+  const resetAdvancedSearch = () => { setActiveFilters(null); setPage(1); };
+
+  const fetchData = () => { if (activeFilters) fetchAdvanced(activeFilters); else fetchSimple(); };
 
   useEffect(() => {
     getBankCapital().then(res => {
@@ -199,6 +247,7 @@ export default function ShareBlocks() {
 
   const columns = [
     { title: 'ID', dataIndex: 'id', width: 50 },
+    { title: 'Sh. ID', key: 'shid', width: 75, render: (_, r) => r.shareholder_id ?? r.shareholder?.id ?? '-' },
     {
       title: 'Shareholder', key: 'sh',
       render: (_, r) => r.shareholder ? `${r.shareholder.first_name} ${r.shareholder.last_name}` : '-',
@@ -265,6 +314,28 @@ export default function ShareBlocks() {
           New Block
         </Button>
       </Row>
+
+      <Row style={{ marginBottom: 12 }} align="middle">
+        <Button
+          icon={<FilterOutlined />}
+          type={advancedOpen ? 'primary' : 'default'}
+          onClick={() => setAdvancedOpen(o => !o)}
+        >
+          {advancedOpen ? 'Hide Advanced Search' : 'Advanced Search'}
+        </Button>
+        {activeFilters && (
+          <Tag color="blue" closable onClose={resetAdvancedSearch} style={{ marginLeft: 8 }}>
+            {activeFilters.length} filter{activeFilters.length === 1 ? '' : 's'} applied
+          </Tag>
+        )}
+      </Row>
+
+      <AdvancedSearchPanel
+        fields={BLK_FIELDS}
+        open={advancedOpen}
+        onSearch={runAdvancedSearch}
+        onReset={resetAdvancedSearch}
+      />
 
       <Table dataSource={data} columns={columns} rowKey="id" loading={loading} size="small"
         pagination={{ current: page, total, pageSize: 20, onChange: setPage }} scroll={{ x: 1200 }} />

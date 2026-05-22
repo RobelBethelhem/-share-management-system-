@@ -57,6 +57,12 @@ func ApproveItem(c *gin.Context) {
 	switch approval.EntityType {
 	case "investment":
 		database.DB.Model(&models.Investment{}).Where("id = ?", approval.EntityID).Update("approval_status", "approved")
+		// Materialise the Allocation for dividend-reinvest investments so the
+		// shareholder formally owns the new shares (no-op for regular cash
+		// investments that already link to an existing allocation).
+		if err := CreateAllocationForDividendInvestment(approval.EntityID); err != nil {
+			fmt.Println("warn: allocation create failed for investment", approval.EntityID, err)
+		}
 	case "transfer":
 		if err := RunTransferApproval(approval.EntityID); err != nil {
 			// Revert the pending_approval so it can be retried
@@ -194,6 +200,11 @@ func ApproveByEntity(c *gin.Context) {
 	switch approval.EntityType {
 	case "investment":
 		database.DB.Model(&models.Investment{}).Where("id = ?", approval.EntityID).Update("approval_status", "approved")
+		// Materialise the Allocation for dividend-reinvest investments — see
+		// CreateAllocationForDividendInvestment doc for guards.
+		if err := CreateAllocationForDividendInvestment(approval.EntityID); err != nil {
+			fmt.Println("warn: allocation create failed for investment", approval.EntityID, err)
+		}
 	case "transfer":
 		if err := RunTransferApproval(approval.EntityID); err != nil {
 			approval.Status = "pending"
@@ -243,24 +254,33 @@ func RejectByEntity(c *gin.Context) {
 	approval.Remark = input.Remark
 	database.DB.Save(&approval)
 
-	// Update entity
+	// Update entity — write both the status flip AND the rejection reason,
+	// so list pages can show "Rejected — <reason>" without joining PendingApproval.
+	rejUpdate := map[string]interface{}{"approval_status": "rejected", "rejection_reason": input.Remark}
+	rejStatusUpdate := map[string]interface{}{"status": "rejected", "rejection_reason": input.Remark}
 	switch approval.EntityType {
 	case "investment":
-		database.DB.Model(&models.Investment{}).Where("id = ?", approval.EntityID).Update("approval_status", "rejected")
+		database.DB.Model(&models.Investment{}).Where("id = ?", approval.EntityID).Updates(rejUpdate)
+		// If this investment was sourced from a dividend reinvestment, reverse
+		// the dividend's reinvested_amount / tax / net / uncollected so the
+		// dividend is collectible again. No-op for normal investments.
+		ReverseDividendReinvestForInvestment(approval.EntityID, uid)
 	case "transfer":
-		database.DB.Model(&models.Transfer{}).Where("id = ?", approval.EntityID).Update("approval_status", "rejected")
+		database.DB.Model(&models.Transfer{}).Where("id = ?", approval.EntityID).Updates(rejUpdate)
 	case "subscription":
-		database.DB.Model(&models.Subscription{}).Where("id = ?", approval.EntityID).Update("approval_status", "rejected")
+		database.DB.Model(&models.Subscription{}).Where("id = ?", approval.EntityID).Updates(rejUpdate)
 	case "block":
-		database.DB.Model(&models.ShareBlock{}).Where("id = ?", approval.EntityID).Update("approval_status", "rejected")
+		database.DB.Model(&models.ShareBlock{}).Where("id = ?", approval.EntityID).Updates(rejUpdate)
+	case "dividend":
+		database.DB.Model(&models.Dividend{}).Where("id = ?", approval.EntityID).Updates(rejUpdate)
 	case "trade_request":
-		database.DB.Model(&models.TradeRequest{}).Where("id = ?", approval.EntityID).Update("status", "rejected")
+		database.DB.Model(&models.TradeRequest{}).Where("id = ?", approval.EntityID).Updates(rejStatusUpdate)
 		var rejTrade models.TradeRequest
 		if database.DB.First(&rejTrade, approval.EntityID).Error == nil {
 			database.DB.Model(&models.ShareListing{}).Where("id = ?", rejTrade.ListingID).Update("status", "active")
 		}
 	case "proxy":
-		database.DB.Model(&models.AGMProxy{}).Where("id = ?", approval.EntityID).Update("status", "rejected")
+		database.DB.Model(&models.AGMProxy{}).Where("id = ?", approval.EntityID).Updates(rejStatusUpdate)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Item rejected"})
@@ -287,24 +307,35 @@ func RejectItem(c *gin.Context) {
 	approval.Remark = input.Remark
 	database.DB.Save(&approval)
 
-	// Update entity
+	// Update entity — same pattern as RejectByEntity: write status + reason
+	// onto the entity itself so the list views can render the rejection reason
+	// without joining PendingApproval.
+	rejUpdate := map[string]interface{}{"approval_status": "rejected", "rejection_reason": input.Remark}
+	rejStatusUpdate := map[string]interface{}{"status": "rejected", "rejection_reason": input.Remark}
 	switch approval.EntityType {
 	case "investment":
-		database.DB.Model(&models.Investment{}).Where("id = ?", approval.EntityID).Update("approval_status", "rejected")
+		database.DB.Model(&models.Investment{}).Where("id = ?", approval.EntityID).Updates(rejUpdate)
+		// Compensating action: if this investment was sourced from a dividend
+		// reinvestment, reverse the dividend's reinvested_amount / tax / net /
+		// uncollected so the dividend is collectible again and a fresh
+		// Subscribe action can be taken.
+		ReverseDividendReinvestForInvestment(approval.EntityID, uid)
 	case "transfer":
-		database.DB.Model(&models.Transfer{}).Where("id = ?", approval.EntityID).Update("approval_status", "rejected")
+		database.DB.Model(&models.Transfer{}).Where("id = ?", approval.EntityID).Updates(rejUpdate)
 	case "subscription":
-		database.DB.Model(&models.Subscription{}).Where("id = ?", approval.EntityID).Update("approval_status", "rejected")
+		database.DB.Model(&models.Subscription{}).Where("id = ?", approval.EntityID).Updates(rejUpdate)
 	case "block":
-		database.DB.Model(&models.ShareBlock{}).Where("id = ?", approval.EntityID).Update("approval_status", "rejected")
+		database.DB.Model(&models.ShareBlock{}).Where("id = ?", approval.EntityID).Updates(rejUpdate)
+	case "dividend":
+		database.DB.Model(&models.Dividend{}).Where("id = ?", approval.EntityID).Updates(rejUpdate)
 	case "trade_request":
-		database.DB.Model(&models.TradeRequest{}).Where("id = ?", approval.EntityID).Update("status", "rejected")
+		database.DB.Model(&models.TradeRequest{}).Where("id = ?", approval.EntityID).Updates(rejStatusUpdate)
 		var rejTrade models.TradeRequest
 		if database.DB.First(&rejTrade, approval.EntityID).Error == nil {
 			database.DB.Model(&models.ShareListing{}).Where("id = ?", rejTrade.ListingID).Update("status", "active")
 		}
 	case "proxy":
-		database.DB.Model(&models.AGMProxy{}).Where("id = ?", approval.EntityID).Update("status", "rejected")
+		database.DB.Model(&models.AGMProxy{}).Where("id = ?", approval.EntityID).Updates(rejStatusUpdate)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Item rejected"})

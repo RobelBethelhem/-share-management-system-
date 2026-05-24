@@ -12,6 +12,7 @@ type Config struct {
 	DBUser     string
 	DBPassword string
 	DBName     string
+	DBTLS      string // "true" to require TLS (TiDB Cloud, PlanetScale, etc.)
 	JWTSecret  string
 	ServerPort string
 }
@@ -25,13 +26,21 @@ func Load() *Config {
 		DBUser:     getEnv("DB_USER", "root"),
 		DBPassword: getEnv("DB_PASSWORD", ""),
 		DBName:     getEnv("DB_NAME", "share_management"),
+		DBTLS:      getEnv("DB_TLS", "false"),
 		JWTSecret:  getEnv("JWT_SECRET", "share-admin-secret-key-2024"),
 		ServerPort: getEnv("SERVER_PORT", "8080"),
 	}
 }
 
 func (c *Config) DSN() string {
-	return c.DBUser + ":" + c.DBPassword + "@tcp(" + c.DBHost + ":" + c.DBPort + ")/" + c.DBName + "?charset=utf8mb4&parseTime=True&loc=Local"
+	dsn := c.DBUser + ":" + c.DBPassword + "@tcp(" + c.DBHost + ":" + c.DBPort + ")/" + c.DBName + "?charset=utf8mb4&parseTime=True&loc=Local"
+	if c.DBTLS == "true" {
+		// TiDB Cloud / PlanetScale / Aiven all need TLS. The mysql driver
+		// validates the cert against the host in the DSN using the system
+		// cert pool (ca-certificates is in the Alpine image).
+		dsn += "&tls=true"
+	}
+	return dsn
 }
 
 func getEnv(key, fallback string) string {

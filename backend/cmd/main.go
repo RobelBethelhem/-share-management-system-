@@ -381,6 +381,7 @@ func main() {
 		}
 
 		// Admin — destructive maintenance endpoints. AdminOnly + body-token guard.
+		api.GET("/admin/reset-categories", middleware.AdminOnly(), handlers.GetResetCategories)
 		api.POST("/admin/reset-data", middleware.AdminOnly(), handlers.ResetData)
 	}
 

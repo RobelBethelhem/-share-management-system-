@@ -140,8 +140,9 @@ export const getBankCapital = () => api.get('/bank-capital');
 export const updateBankCapital = (data) => api.put('/bank-capital', data);
 
 // Admin — destructive
-export const resetAllData = (confirmation) =>
-  api.post('/admin/reset-data', { confirmation });
+export const getResetCategories = () => api.get('/admin/reset-categories');
+export const resetAllData = (confirmation, categories = []) =>
+  api.post('/admin/reset-data', { confirmation, categories });
 
 // Share Splits
 export const getShareSplits = () => api.get('/share-splits');

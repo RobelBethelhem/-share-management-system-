@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import {
   Card, Form, Input, InputNumber, Button, Space, Table, Tag, message,
   Typography, Row, Col, Divider, Popconfirm, Modal, Descriptions, Statistic,
-  Alert,
+  Alert, Checkbox,
 } from 'antd';
 import {
   SaveOutlined, PlusOutlined, DeleteOutlined, ExperimentOutlined,
@@ -10,7 +10,7 @@ import {
 } from '@ant-design/icons';
 import {
   getSystemSettings, createSystemSetting, updateSystemSetting, deleteSystemSetting,
-  testFormula, getBankCapital, updateBankCapital, resetAllData,
+  testFormula, getBankCapital, updateBankCapital, resetAllData, getResetCategories,
 } from '../services/api';
 import { formatCurrency } from '../utils/format';
 
@@ -32,6 +32,16 @@ export default function SystemSettings() {
   const [resetConfirmText, setResetConfirmText] = useState('');
   const [resetLoading, setResetLoading] = useState(false);
   const [resetResult, setResetResult] = useState(null);
+  const [resetCategories, setResetCategories] = useState([]);
+  const [selectedCategories, setSelectedCategories] = useState([]);
+
+  // Fetch available reset categories once on mount so the modal can render
+  // checkboxes. Failure here is non-fatal — modal still works as a full reset.
+  useEffect(() => {
+    getResetCategories()
+      .then(r => setResetCategories(r.data?.categories || []))
+      .catch(() => {});
+  }, []);
 
   const handleResetAllData = async () => {
     if (resetConfirmText.trim() !== 'RESET') {
@@ -40,9 +50,13 @@ export default function SystemSettings() {
     }
     setResetLoading(true);
     try {
-      const res = await resetAllData(resetConfirmText.trim());
+      const res = await resetAllData(resetConfirmText.trim(), selectedCategories);
       setResetResult(res.data);
-      message.success('All business data wiped. Defaults re-seeded.');
+      message.success(
+        selectedCategories.length > 0
+          ? `${selectedCategories.length} categor${selectedCategories.length === 1 ? 'y' : 'ies'} wiped.`
+          : 'All business data wiped. Defaults re-seeded.'
+      );
       await fetchData();
     } catch (e) {
       message.error(e.response?.data?.error || 'Reset failed');
@@ -419,15 +433,29 @@ export default function SystemSettings() {
           type="primary"
           icon={<DeleteOutlined />}
           style={{ marginTop: 12 }}
-          onClick={() => { setResetConfirmText(''); setResetResult(null); setResetModal(true); }}
+          onClick={() => {
+            setResetConfirmText('');
+            setResetResult(null);
+            setSelectedCategories([]);
+            setResetModal(true);
+          }}
         >
-          Reset All Data&hellip;
+          Reset Data&hellip;
         </Button>
       </Card>
 
       <Modal
         open={resetModal}
-        title={<Space><WarningOutlined style={{ color: '#cf1322' }} /><Text strong style={{ color: '#cf1322' }}>Confirm: Reset All Data</Text></Space>}
+        title={
+          <Space>
+            <WarningOutlined style={{ color: '#cf1322' }} />
+            <Text strong style={{ color: '#cf1322' }}>
+              {selectedCategories.length > 0
+                ? `Confirm: Wipe ${selectedCategories.length} categor${selectedCategories.length === 1 ? 'y' : 'ies'}`
+                : 'Confirm: Reset ALL Data'}
+            </Text>
+          </Space>
+        }
         onCancel={() => setResetModal(false)}
         footer={resetResult ? (
           <Button type="primary" onClick={() => setResetModal(false)}>Close</Button>
@@ -439,23 +467,74 @@ export default function SystemSettings() {
               disabled={resetConfirmText.trim() !== 'RESET'}
               onClick={handleResetAllData}
             >
-              Wipe Database
+              {selectedCategories.length > 0 ? 'Wipe Selected' : 'Wipe All Data'}
             </Button>
           </Space>
         )}
         maskClosable={!resetLoading}
         closable={!resetLoading}
-        width={560}
+        width={720}
       >
         {!resetResult ? (
           <>
             <Alert
               type="warning"
               showIcon
-              message="Irreversible operation"
-              description="Every business record will be deleted. Only the users (login accounts) table is preserved."
-              style={{ marginBottom: 16 }}
+              message={selectedCategories.length > 0 ? 'Selective wipe — irreversible' : 'Full reset — irreversible'}
+              description={
+                selectedCategories.length > 0
+                  ? `Only the selected categories will be wiped. Each category cascades to any other tables that reference it (so no orphan rows remain). All other business data and Formulas & Configuration stay intact.`
+                  : 'No categories selected → this will wipe EVERY business table. Only login accounts and Formulas & Configuration (system_settings, bank_capital, tax brackets, mini-apps) are preserved.'
+              }
+              style={{ marginBottom: 12 }}
             />
+
+            <div style={{
+              border: '1px solid #d9d9d9',
+              borderRadius: 6,
+              padding: 12,
+              marginBottom: 12,
+              maxHeight: 280,
+              overflowY: 'auto',
+              background: '#fafafa',
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <Text strong style={{ fontSize: 13 }}>
+                  Categories to wipe&nbsp;
+                  <Text type="secondary" style={{ fontWeight: 400, fontSize: 11 }}>
+                    (leave all unchecked for a full reset)
+                  </Text>
+                </Text>
+                <Space size={4}>
+                  <Button size="small" type="link" onClick={() => setSelectedCategories([])}>
+                    Clear
+                  </Button>
+                  <Button size="small" type="link" danger
+                    onClick={() => setSelectedCategories(resetCategories.map(c => c.key))}>
+                    Select all
+                  </Button>
+                </Space>
+              </div>
+              <Checkbox.Group
+                value={selectedCategories}
+                onChange={setSelectedCategories}
+                style={{ width: '100%' }}
+              >
+                <Row gutter={[8, 4]}>
+                  {resetCategories.map(cat => (
+                    <Col span={24} key={cat.key}>
+                      <Checkbox value={cat.key}>
+                        <Text strong style={{ fontSize: 12 }}>{cat.label}</Text>
+                        <div style={{ fontSize: 11, color: '#666', marginLeft: 24, marginTop: 1, lineHeight: 1.3 }}>
+                          {cat.description}
+                        </div>
+                      </Checkbox>
+                    </Col>
+                  ))}
+                </Row>
+              </Checkbox.Group>
+            </div>
+
             <Text>Type <Text code strong>RESET</Text> (uppercase) below to enable the Wipe button:</Text>
             <Input
               placeholder="Type RESET"
@@ -474,12 +553,24 @@ export default function SystemSettings() {
               style={{ marginBottom: 12 }}
             />
             <Descriptions size="small" column={1} bordered>
+              <Descriptions.Item label="Mode">
+                <Tag color={resetResult.mode === 'full' ? 'red' : 'orange'}>
+                  {resetResult.mode === 'full' ? 'FULL RESET' : 'SELECTIVE'}
+                </Tag>
+              </Descriptions.Item>
               <Descriptions.Item label="Tables cleared">
                 <Text strong>{resetResult.cleared_tables?.length || 0}</Text>
               </Descriptions.Item>
-              <Descriptions.Item label="Tables preserved">
-                {(resetResult.preserved || []).map(t => <Tag key={t} color="green">{t}</Tag>)}
-              </Descriptions.Item>
+              {resetResult.categories_wiped && (
+                <Descriptions.Item label="Categories wiped">
+                  {resetResult.categories_wiped.map(k => <Tag key={k} color="orange">{k}</Tag>)}
+                </Descriptions.Item>
+              )}
+              {resetResult.preserved && (
+                <Descriptions.Item label="Tables preserved">
+                  {resetResult.preserved.map(t => <Tag key={t} color="green">{t}</Tag>)}
+                </Descriptions.Item>
+              )}
               {Object.keys(resetResult.failed_tables || {}).length > 0 && (
                 <Descriptions.Item label="Failures">
                   {Object.entries(resetResult.failed_tables).map(([t, err]) => (
@@ -492,7 +583,7 @@ export default function SystemSettings() {
               type="info"
               showIcon
               style={{ marginTop: 12 }}
-              message="Refresh the page (or re-login) to see the empty system. Default settings have been re-seeded."
+              message="Refresh the page (or re-login) to see the result. Defaults are re-seeded only on a full reset."
             />
           </>
         )}

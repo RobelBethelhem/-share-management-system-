@@ -27,14 +27,24 @@ import (
 // ----- helpers -----
 
 // ciBaseBreakdown is the full per-shareholder basis breakdown used for
-// transparency in the preview UI. The basis itself is PaidShares + CIPaidShares.
+// transparency in the preview UI.
+//
+// Basis = TotalAllocatedShares + CIAllocatedShares
+//   pre-CI total allocated (paid + unpaid) + total allocated (paid + unpaid)
+//   from earlier rounds of this CI.
+//
+// We intentionally use the FULL allocated count, not just paid. The intent
+// is that every share a shareholder is entitled to (regardless of whether
+// they've finished paying for it) counts as their basis for receiving new
+// shares in a capital increase. PaidShares / UnpaidShares are kept in the
+// payload for UI transparency but no longer drive the Hamilton math.
 type ciBaseBreakdown struct {
-	AllocationCount     int   `json:"allocation_count"`
-	TotalAllocatedShares int64 `json:"total_allocated_shares"`
-	PaidShares          int64 `json:"paid_shares"`         // pre-CI paid (FIFO)
-	UnpaidShares        int64 `json:"unpaid_shares"`       // pre-CI unpaid
-	CIPaidShares        int64 `json:"ci_paid_shares"`      // round 2+: paid from this CI's earlier rounds
-	Total               int64 `json:"total"`               // basis = PaidShares + CIPaidShares
+	AllocationCount      int   `json:"allocation_count"`
+	TotalAllocatedShares int64 `json:"total_allocated_shares"` // pre-CI total (paid + unpaid)
+	PaidShares           int64 `json:"paid_shares"`            // pre-CI paid (FIFO) — display only
+	UnpaidShares         int64 `json:"unpaid_shares"`          // pre-CI unpaid — display only
+	CIAllocatedShares    int64 `json:"ci_allocated_shares"`    // round 2+: total allocated from earlier rounds of this CI
+	Total                int64 `json:"total"`                  // basis used by Hamilton
 }
 
 func ciBaseBreakdownFor(ciID uint, round int, shareholderID uint) ciBaseBreakdown {
@@ -53,18 +63,78 @@ func ciBaseBreakdownFor(ciID uint, round int, shareholderID uint) ciBaseBreakdow
 		b.UnpaidShares = 0
 	}
 
-	// Round 2+: paid shares from earlier rounds of THIS CI
+	// Round 2+: total allocated (paid + unpaid) from earlier rounds of THIS CI
 	if round > 1 {
 		var thisCIAllocs []models.Allocation
 		database.DB.Where("shareholder_id = ? AND capital_increase_id = ? AND round < ?",
 			shareholderID, ciID, round).
 			Order("id ASC").Find(&thisCIAllocs)
 		for _, a := range thisCIAllocs {
-			b.CIPaidShares += computeAllocPaidShares(shareholderID, a.ID)
+			b.CIAllocatedShares += a.AllocatedShares
 		}
 	}
-	b.Total = b.PaidShares + b.CIPaidShares
+	b.Total = b.TotalAllocatedShares + b.CIAllocatedShares
 	return b
+}
+
+// fullyConfirmedAllPreSubsInCI returns true iff every pre-subscription the
+// shareholder has in this CI was followed by a confirmation of the FULL
+// offered amount. Partial confirmations, declines, and not-yet-confirmed
+// pre-subs all count as "not fully confirmed".
+//
+// Used as a gate when creating CIAdditionalRequest rows — a shareholder
+// who hasn't accepted everything offered cannot ask for MORE.
+func fullyConfirmedAllPreSubsInCI(ciID, shareholderID uint) bool {
+	var preSubs []models.Subscription
+	database.DB.Where(
+		"capital_increase_id = ? AND shareholder_id = ? AND type = ?",
+		ciID, shareholderID, "pre-subscription",
+	).Find(&preSubs)
+	if len(preSubs) == 0 {
+		// No pre-subs at all — they aren't in this CI yet; can't ask for additional.
+		return false
+	}
+	for _, ps := range preSubs {
+		var conf models.Subscription
+		err := database.DB.Where(
+			"capital_increase_id = ? AND shareholder_id = ? AND type = ? AND round = ? AND status = ?",
+			ciID, shareholderID, "confirmation", ps.Round, "active",
+		).First(&conf).Error
+		if err != nil || conf.NumberOfShares < ps.NumberOfShares {
+			return false
+		}
+	}
+	return true
+}
+
+// fullyConfirmedAllPriorRounds returns true iff every pre-subscription the
+// shareholder had in rounds 1..upToRound-1 of this CI was followed by a
+// confirmation of the FULL offered amount.
+//
+// Used as a gate for round 2+ allocation: a shareholder who partially
+// confirmed (or didn't confirm at all) in an earlier round must NOT receive
+// additional allocations in later rounds, even if they have a pending
+// additional request.
+func fullyConfirmedAllPriorRounds(ciID, shareholderID uint, upToRound int) bool {
+	var preSubs []models.Subscription
+	database.DB.Where(
+		"capital_increase_id = ? AND shareholder_id = ? AND type = ? AND round < ?",
+		ciID, shareholderID, "pre-subscription", upToRound,
+	).Find(&preSubs)
+	if len(preSubs) == 0 {
+		return true // no prior pre-subs → gate doesn't apply
+	}
+	for _, ps := range preSubs {
+		var conf models.Subscription
+		err := database.DB.Where(
+			"capital_increase_id = ? AND shareholder_id = ? AND type = ? AND round = ? AND status = ?",
+			ciID, shareholderID, "confirmation", ps.Round, "active",
+		).First(&conf).Error
+		if err != nil || conf.NumberOfShares < ps.NumberOfShares {
+			return false
+		}
+	}
+	return true
 }
 
 // ciRemainingPool returns total_new_shares minus shares already confirmed
@@ -182,6 +252,12 @@ func computeRoundAllocation(ci *models.CapitalIncrease, round int) ([]ciAllocEnt
 			if !ok || lim <= 0 {
 				// No pending additional request for this shareholder — they
 				// don't participate in this round at all.
+				continue
+			}
+			// Partial-confirmation gate: a shareholder who didn't fully
+			// confirm every prior-round pre-sub is locked out of further
+			// CI rounds, even if they have a pending additional request.
+			if !fullyConfirmedAllPriorRounds(ci.ID, s.ID, round) {
 				continue
 			}
 			rowCap = &lim
@@ -370,7 +446,18 @@ func CreateCapitalIncrease(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusCreated, gin.H{"message": "Capital increase created", "id": ci.ID, "data": ci})
+	// Queue a PendingApproval so the CI shows up in the Authorization tab.
+	// Status stays "draft" until an admin approves there → "approved" → admin
+	// then clicks Start on the campaign detail page to enter round_open.
+	database.DB.Create(&models.PendingApproval{
+		EntityType:  "capital_increase",
+		EntityID:    ci.ID,
+		Action:      "create",
+		RequestedBy: getUserID(c),
+		Status:      "pending",
+		RequestedAt: time.Now(),
+	})
+	c.JSON(http.StatusCreated, gin.H{"message": "Capital increase created, pending authorization", "id": ci.ID, "data": ci})
 }
 
 func UpdateCapitalIncrease(c *gin.Context) {
@@ -409,8 +496,8 @@ func StartCapitalIncrease(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Capital increase not found"})
 		return
 	}
-	if ci.Status != "draft" {
-		c.JSON(http.StatusConflict, gin.H{"error": "Only draft capital increases can be started"})
+	if ci.Status != "approved" {
+		c.JSON(http.StatusConflict, gin.H{"error": "Only approved capital increases can be started. Approve it from the Authorization tab first."})
 		return
 	}
 	// Disallow concurrent active CIs.
@@ -608,6 +695,15 @@ func ConfirmCISubscription(c *gin.Context) {
 	}
 	if input.AdditionalRequested < 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "additional_requested cannot be negative"})
+		return
+	}
+	// Gate: a shareholder asking for additional shares in this CI must also
+	// confirm THIS pre-sub in full (otherwise they're partial-confirming AND
+	// asking for more, which contradicts the campaign's rules).
+	if input.AdditionalRequested > 0 && confirmed < sub.NumberOfShares {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Cannot request additional shares with a partial confirmation. Confirm the full offered amount first, then ask for additional.",
+		})
 		return
 	}
 
@@ -1000,6 +1096,16 @@ func CreateCIAdditionalRequest(c *gin.Context) {
 	var input ciAdditionalRequestInput
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	// Gate: only shareholders who have fully confirmed every pre-sub offered
+	// in this CI can request additional shares. Partial confirms and declines
+	// disqualify — you can't ask for MORE if you haven't accepted what's on
+	// the table.
+	if !fullyConfirmedAllPreSubsInCI(ci.ID, input.ShareholderID) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Shareholder must fully confirm every pre-subscription in this campaign before requesting additional shares. Partial confirmations, declines, and not-yet-confirmed rows all disqualify.",
+		})
 		return
 	}
 	req := models.CIAdditionalRequest{

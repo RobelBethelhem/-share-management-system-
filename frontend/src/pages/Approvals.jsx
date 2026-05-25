@@ -6,7 +6,7 @@ import {
 import {
   CheckOutlined, CloseOutlined, ShopOutlined, DollarOutlined, TeamOutlined,
   UserOutlined, CalendarOutlined, SwapOutlined, FileTextOutlined, LockOutlined,
-  BankOutlined,
+  BankOutlined, RiseOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { getApprovals, approveItem, rejectItem } from '../services/api';
@@ -17,14 +17,17 @@ const { Title, Text } = Typography;
 const TYPE_COLORS = {
   investment: 'blue', transfer: 'purple', subscription: 'green',
   block: 'red', dividend: 'orange', trade_request: 'magenta', proxy: 'cyan',
+  capital_increase: 'gold',
 };
 const TYPE_LABELS = {
   investment: 'INVESTMENT', transfer: 'TRANSFER', subscription: 'SUBSCRIPTION',
   block: 'SHARE BLOCK', dividend: 'DIVIDEND', trade_request: 'MARKETPLACE TRADE', proxy: 'AGM PROXY',
+  capital_increase: 'CAPITAL INCREASE',
 };
 const TYPE_ICONS = {
   investment: <BankOutlined />, transfer: <SwapOutlined />, subscription: <FileTextOutlined />,
   block: <LockOutlined />, dividend: <DollarOutlined />, trade_request: <ShopOutlined />, proxy: <TeamOutlined />,
+  capital_increase: <RiseOutlined />,
 };
 
 const formatETB = (v) => `ETB ${Number(v || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
@@ -73,6 +76,10 @@ export default function Approvals() {
         return { detail: (await api.get(`/share-blocks/${id}`)).data };
       case 'dividend':
         return { detail: (await api.get(`/dividends/${id}`)).data };
+      case 'capital_increase': {
+        const r = await api.get(`/capital-increases/${id}`);
+        return { detail: r.data.data, extras: { remaining: r.data.remaining } };
+      }
       case 'trade_request': {
         const r = await api.get(`/marketplace/trades/${id}`);
         return { detail: r.data.data, extras: { fees: r.data.fees } };
@@ -183,6 +190,7 @@ export default function Approvals() {
             { value: 'subscription', label: 'Subscription' },
             { value: 'block', label: 'Share Block' },
             { value: 'dividend', label: 'Dividend' },
+            { value: 'capital_increase', label: 'Capital Increase' },
             { value: 'trade_request', label: 'Marketplace Trade' },
             { value: 'proxy', label: 'AGM Proxy' },
           ]}

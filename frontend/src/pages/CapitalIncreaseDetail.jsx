@@ -581,6 +581,16 @@ export default function CapitalIncreaseDetail() {
       <Card title="Actions" size="small" style={{ marginBottom: 16 }}>
         <Space wrap>
           {ci.status === 'draft' && (
+            <Tag color="orange" style={{ fontSize: 12, padding: '4px 10px' }}>
+              Pending authorization — review on the Authorization tab
+            </Tag>
+          )}
+          {ci.status === 'rejected' && (
+            <Tag color="red" style={{ fontSize: 12, padding: '4px 10px' }}>
+              Rejected — see authorization remark, then delete or create a new campaign
+            </Tag>
+          )}
+          {ci.status === 'approved' && (
             <Button type="primary" icon={<PlayCircleOutlined />} onClick={handleStart}>
               Start Campaign
             </Button>
@@ -643,9 +653,9 @@ export default function CapitalIncreaseDetail() {
                 : 'Will Get = floor(Pool × Basis ÷ Total Basis) + Remainder Uplift'}
               <br />
               <Text type="secondary">
-                Round 1 basis = paid pre-CI shares. Round 2+ basis = paid pre-CI shares + paid shares from earlier rounds of this CI.
+                Round 1 basis = all allocated pre-CI shares (paid + unpaid). Round 2+ basis = all allocated pre-CI shares + all allocated shares from earlier rounds of this CI (paid or unpaid).
                 Remainder Uplift = +1 share awarded to the largest fractional remainders (Hamilton method) so the round totals match the pool exactly.
-                {previewData.round >= 2 && ' Round 2+ only includes shareholders with pending additional requests; each gets at most the remaining (requested − fulfilled) of those requests.'}
+                {previewData.round >= 2 && ' Round 2+ only includes shareholders who (a) have pending additional requests AND (b) fully confirmed every prior-round pre-subscription. Partial confirmers and decliners are locked out of further rounds.'}
               </Text>
             </div>
             <Table
@@ -666,15 +676,15 @@ export default function CapitalIncreaseDetail() {
                           <Text strong>Holdings breakdown</Text>
                           <ul style={{ marginTop: 6, marginBottom: 6, paddingLeft: 18 }}>
                             <li>Pre-CI allocations: <Text strong>{bd.allocation_count}</Text></li>
-                            <li>Total owned (allocated): <Text strong>{formatNumber(bd.total_allocated_shares)}</Text></li>
-                            <li>Paid (pre-CI): <Text strong style={{ color: '#3f8600' }}>{formatNumber(bd.paid_shares)}</Text></li>
-                            <li>Unpaid (pre-CI): <Text strong style={{ color: '#cf1322' }}>{formatNumber(bd.unpaid_shares)}</Text></li>
-                            {bd.ci_paid_shares > 0 && (
-                              <li>Paid in earlier CI rounds: <Text strong style={{ color: '#1677ff' }}>{formatNumber(bd.ci_paid_shares)}</Text></li>
+                            <li>Total owned (pre-CI allocated): <Text strong>{formatNumber(bd.total_allocated_shares)}</Text></li>
+                            <li>&nbsp;&nbsp;Paid (informational): <Text style={{ color: '#3f8600' }}>{formatNumber(bd.paid_shares)}</Text></li>
+                            <li>&nbsp;&nbsp;Unpaid (informational): <Text style={{ color: '#cf1322' }}>{formatNumber(bd.unpaid_shares)}</Text></li>
+                            {bd.ci_allocated_shares > 0 && (
+                              <li>Allocated in earlier CI rounds: <Text strong style={{ color: '#1677ff' }}>{formatNumber(bd.ci_allocated_shares)}</Text></li>
                             )}
                             <li>
-                              <Text strong>Basis used = {formatNumber(bd.paid_shares)}
-                                {bd.ci_paid_shares > 0 && ` + ${formatNumber(bd.ci_paid_shares)}`}
+                              <Text strong>Basis used = {formatNumber(bd.total_allocated_shares)}
+                                {bd.ci_allocated_shares > 0 && ` + ${formatNumber(bd.ci_allocated_shares)}`}
                                 {' '}= {formatNumber(bd.total)}</Text>
                             </li>
                           </ul>
@@ -716,7 +726,7 @@ export default function CapitalIncreaseDetail() {
                 { title: 'Owned', dataIndex: ['breakdown', 'total_allocated_shares'], render: (v) => formatNumber(v) },
                 { title: 'Paid', dataIndex: ['breakdown', 'paid_shares'], render: (v) => <Text style={{ color: '#3f8600' }}>{formatNumber(v)}</Text> },
                 { title: 'Unpaid', dataIndex: ['breakdown', 'unpaid_shares'], render: (v) => <Text style={{ color: '#cf1322' }}>{formatNumber(v)}</Text> },
-                ...(previewData.round > 1 ? [{ title: 'CI Paid', dataIndex: ['breakdown', 'ci_paid_shares'], render: (v) => <Text style={{ color: '#1677ff' }}>{formatNumber(v)}</Text> }] : []),
+                ...(previewData.round > 1 ? [{ title: 'CI Allocated', dataIndex: ['breakdown', 'ci_allocated_shares'], render: (v) => <Text style={{ color: '#1677ff' }}>{formatNumber(v)}</Text> }] : []),
                 { title: 'Basis', dataIndex: 'base_shares', render: (v) => <Text strong>{formatNumber(v)}</Text> },
                 ...(previewData.round >= 2 ? [{
                   title: 'Request Cap', key: 'cap',

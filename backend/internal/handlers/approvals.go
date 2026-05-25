@@ -83,6 +83,10 @@ func ApproveItem(c *gin.Context) {
 		executeTradeApproval(approval.EntityID)
 	case "proxy":
 		database.DB.Model(&models.AGMProxy{}).Where("id = ?", approval.EntityID).Update("status", "approved")
+	case "capital_increase":
+		// Approval transitions draft → approved. Admin then clicks Start on the
+		// CI detail page to enter round_open and run Round 1.
+		database.DB.Model(&models.CapitalIncrease{}).Where("id = ?", approval.EntityID).Update("status", "approved")
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Item approved"})
@@ -224,6 +228,8 @@ func ApproveByEntity(c *gin.Context) {
 		executeTradeApproval(approval.EntityID)
 	case "proxy":
 		database.DB.Model(&models.AGMProxy{}).Where("id = ?", approval.EntityID).Update("status", "approved")
+	case "capital_increase":
+		database.DB.Model(&models.CapitalIncrease{}).Where("id = ?", approval.EntityID).Update("status", "approved")
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Item approved"})
@@ -281,6 +287,11 @@ func RejectByEntity(c *gin.Context) {
 		}
 	case "proxy":
 		database.DB.Model(&models.AGMProxy{}).Where("id = ?", approval.EntityID).Updates(rejStatusUpdate)
+	case "capital_increase":
+		// Reject keeps the CI row but marks status=rejected so admin can either
+		// delete it or open a new campaign. No business action to undo.
+		database.DB.Model(&models.CapitalIncrease{}).Where("id = ?", approval.EntityID).
+			Updates(map[string]interface{}{"status": "rejected", "remark": input.Remark})
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Item rejected"})
@@ -336,6 +347,11 @@ func RejectItem(c *gin.Context) {
 		}
 	case "proxy":
 		database.DB.Model(&models.AGMProxy{}).Where("id = ?", approval.EntityID).Updates(rejStatusUpdate)
+	case "capital_increase":
+		// Reject keeps the CI row but marks status=rejected so admin can either
+		// delete it or open a new campaign. No business action to undo.
+		database.DB.Model(&models.CapitalIncrease{}).Where("id = ?", approval.EntityID).
+			Updates(map[string]interface{}{"status": "rejected", "remark": input.Remark})
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Item rejected"})

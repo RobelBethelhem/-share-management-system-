@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -10,6 +11,114 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+// validateInvestmentCap checks that the proposed investment doesn't push
+// total commitments (paid + pending) above the allocation cap.
+//
+// Three branches:
+//   - transfer_in / transfer_out: ownership moves, not money — always allow.
+//   - allocation_id given: cap = that single allocation's allocated amount
+//     minus everything already pending/approved against it.
+//   - allocation_id null: cap = total approved allocations for this
+//     shareholder minus everything already pending/approved across the
+//     shareholder. (Investments without allocation_id feed the FIFO
+//     unlinked pool.) If the shareholder has no approved allocations
+//     yet, the check is skipped — early payments before allocation are
+//     legitimate.
+//
+// Returns (nil, nil) when the payment is within cap. On violation,
+// returns a user-facing error message + a structured details map for
+// the response body. excludeInvestmentID is non-zero when updating an
+// existing investment, so the row being updated isn't double-counted.
+func validateInvestmentCap(inv *models.Investment, excludeInvestmentID uint) (error, gin.H) {
+	if inv.PaymentMethod == "transfer_in" || inv.PaymentMethod == "transfer_out" {
+		return nil, nil
+	}
+
+	// Per-allocation cap
+	if inv.AllocationID != nil && *inv.AllocationID > 0 {
+		var alloc models.Allocation
+		if err := database.DB.First(&alloc, *inv.AllocationID).Error; err != nil {
+			return fmt.Errorf("Allocation not found"), nil
+		}
+		if alloc.ShareholderID != inv.ShareholderID {
+			return fmt.Errorf("Allocation does not belong to this shareholder"), nil
+		}
+
+		q := database.DB.Model(&models.Investment{}).
+			Where("allocation_id = ? AND status = 'active' AND approval_status IN ('pending','approved') AND payment_method NOT IN ('transfer_in','transfer_out')",
+				*inv.AllocationID)
+		if excludeInvestmentID > 0 {
+			q = q.Where("id != ?", excludeInvestmentID)
+		}
+		var existingAmount float64
+		var existingShares int64
+		q.Select("COALESCE(SUM(amount), 0)").Scan(&existingAmount)
+		q.Select("COALESCE(SUM(number_of_shares), 0)").Scan(&existingShares)
+
+		maxAmount := alloc.AllocatedAmount - existingAmount
+		maxShares := alloc.AllocatedShares - existingShares
+
+		if inv.Amount > maxAmount+0.01 {
+			return fmt.Errorf(
+				"Amount exceeds allocation cap. Allocation %s: allocated %.2f ETB, already paid/pending %.2f ETB, maximum new payment %.2f ETB.",
+				alloc.AllocationNo, alloc.AllocatedAmount, existingAmount, maxAmount,
+			), gin.H{
+				"allocation_no":     alloc.AllocationNo,
+				"allocated_amount":  alloc.AllocatedAmount,
+				"already_committed": existingAmount,
+				"max_amount":        maxAmount,
+				"attempted":         inv.Amount,
+			}
+		}
+		if inv.NumberOfShares > maxShares {
+			return fmt.Errorf(
+				"Shares exceed allocation cap. Allocation %s: allocated %d shares, already paid/pending %d, maximum new shares %d.",
+				alloc.AllocationNo, alloc.AllocatedShares, existingShares, maxShares,
+			), gin.H{
+				"allocation_no":     alloc.AllocationNo,
+				"allocated_shares":  alloc.AllocatedShares,
+				"already_committed": existingShares,
+				"max_shares":        maxShares,
+				"attempted":         inv.NumberOfShares,
+			}
+		}
+		return nil, nil
+	}
+
+	// Unlinked payment — cap against shareholder's total approved allocations.
+	var totalAllocated float64
+	database.DB.Model(&models.Allocation{}).
+		Where("shareholder_id = ? AND approval_status = 'approved'", inv.ShareholderID).
+		Select("COALESCE(SUM(allocated_amount), 0)").Scan(&totalAllocated)
+	if totalAllocated <= 0 {
+		// No allocations yet → can't validate. Allow.
+		return nil, nil
+	}
+
+	q := database.DB.Model(&models.Investment{}).
+		Where("shareholder_id = ? AND status = 'active' AND approval_status IN ('pending','approved') AND payment_method NOT IN ('transfer_in','transfer_out')",
+			inv.ShareholderID)
+	if excludeInvestmentID > 0 {
+		q = q.Where("id != ?", excludeInvestmentID)
+	}
+	var totalCommitted float64
+	q.Select("COALESCE(SUM(amount), 0)").Scan(&totalCommitted)
+
+	maxAmount := totalAllocated - totalCommitted
+	if inv.Amount > maxAmount+0.01 {
+		return fmt.Errorf(
+			"Amount exceeds the shareholder's total allocation cap. Total allocated %.2f ETB, already paid/pending %.2f ETB, maximum new payment %.2f ETB. Tip: pick a specific allocation from the dropdown for a tighter cap.",
+			totalAllocated, totalCommitted, maxAmount,
+		), gin.H{
+			"total_allocated":   totalAllocated,
+			"already_committed": totalCommitted,
+			"max_amount":        maxAmount,
+			"attempted":         inv.Amount,
+		}
+	}
+	return nil, nil
+}
 
 // computeAllocPaidShares returns the effective paid shares for one allocation,
 // applying the same FIFO unlinked-pool logic used in GetShareholderInvestmentSummary.
@@ -152,6 +261,16 @@ func CreateInvestment(c *gin.Context) {
 		inv.NumberOfShares = int64(inv.Amount / inv.ParValue)
 	}
 
+	// Allocation cap validation — reject overpayment before creating the row.
+	if err, details := validateInvestmentCap(&inv, 0); err != nil {
+		resp := gin.H{"error": err.Error()}
+		for k, v := range details {
+			resp[k] = v
+		}
+		c.JSON(http.StatusBadRequest, resp)
+		return
+	}
+
 	inv.ApprovalStatus = "pending"
 	database.DB.Create(&inv)
 
@@ -176,6 +295,16 @@ func UpdateInvestment(c *gin.Context) {
 	}
 	if err := c.ShouldBindJSON(&inv); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	// Allocation cap validation — exclude this row from the existing sum
+	// so editing fields other than amount doesn't trip the cap.
+	if err, details := validateInvestmentCap(&inv, inv.ID); err != nil {
+		resp := gin.H{"error": err.Error()}
+		for k, v := range details {
+			resp[k] = v
+		}
+		c.JSON(http.StatusBadRequest, resp)
 		return
 	}
 	database.DB.Save(&inv)

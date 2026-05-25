@@ -61,6 +61,7 @@ export default function Investments() {
   const [parValue, setParValue] = useState(0);
   const [summary, setSummary] = useState(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
+  const [selectedAlloc, setSelectedAlloc] = useState(null); // for cap validation
   const [form] = Form.useForm();
   const lastChanged = useRef(null);
 
@@ -133,6 +134,7 @@ export default function Investments() {
 
   const handleShareholderSelect = async (shId) => {
     setSummary(null);
+    setSelectedAlloc(null);
     form.setFieldValue('allocation_id', undefined);
     if (!shId) return;
     setSummaryLoading(true);
@@ -144,9 +146,16 @@ export default function Investments() {
   };
 
   const handleAllocationSelect = (allocId) => {
-    if (!allocId || !summary?.allocations) return;
+    if (!allocId || !summary?.allocations) {
+      setSelectedAlloc(null);
+      return;
+    }
     const alloc = summary.allocations.find(a => a.id === allocId);
-    if (!alloc) return;
+    if (!alloc) {
+      setSelectedAlloc(null);
+      return;
+    }
+    setSelectedAlloc(alloc);
     const remaining = alloc.remaining_amount > 0 ? alloc.remaining_amount : alloc.allocated_amount;
     const remainingShares = alloc.allocated_shares - alloc.paid_shares;
     form.setFieldsValue({
@@ -154,7 +163,18 @@ export default function Investments() {
       number_of_shares: remainingShares > 0 ? remainingShares : undefined,
     });
     lastChanged.current = null;
+    // Re-validate any already-entered values against the new cap
+    form.validateFields(['amount', 'number_of_shares']).catch(() => {});
   };
+
+  // Caps used by Form.Item validators below. When no allocation is selected,
+  // fall back to the shareholder's total outstanding balance.
+  const capAmount = selectedAlloc
+    ? (selectedAlloc.remaining_amount > 0 ? selectedAlloc.remaining_amount : 0)
+    : (summary?.outstanding_balance > 0 ? summary.outstanding_balance : null);
+  const capShares = selectedAlloc
+    ? Math.max(0, (selectedAlloc.allocated_shares || 0) - (selectedAlloc.paid_shares || 0))
+    : null;
 
   const handlePaymentDateChange = (date) => {
     if (date) {
@@ -180,6 +200,7 @@ export default function Investments() {
     form.resetFields();
     form.setFieldValue('par_value', parValue);
     setSummary(null);
+    setSelectedAlloc(null);
     setShareholders([]);
     lastChanged.current = null;
     setModalOpen(true);
@@ -480,7 +501,35 @@ export default function Investments() {
 
           <Row gutter={16}>
             <Col span={8}>
-              <Form.Item name="amount" label="Amount (ETB)" rules={[{ required: true }]}>
+              <Form.Item
+                name="amount"
+                label={
+                  <Space size={4}>
+                    <span>Amount (ETB)</span>
+                    {capAmount !== null && capAmount >= 0 && (
+                      <Tag color={capAmount > 0 ? 'blue' : 'red'} style={{ fontSize: 10, marginLeft: 4 }}>
+                        max {formatCurrency(capAmount)}
+                      </Tag>
+                    )}
+                  </Space>
+                }
+                rules={[
+                  { required: true },
+                  {
+                    validator: (_, v) => {
+                      if (v == null) return Promise.resolve();
+                      if (capAmount !== null && capAmount >= 0 && v > capAmount + 0.01) {
+                        return Promise.reject(new Error(
+                          selectedAlloc
+                            ? `Exceeds allocation cap. Max for ${selectedAlloc.allocation_no}: ${formatCurrency(capAmount)}`
+                            : `Exceeds outstanding balance. Max: ${formatCurrency(capAmount)}`
+                        ));
+                      }
+                      return Promise.resolve();
+                    },
+                  },
+                ]}
+              >
                 <InputNumber
                   style={{ width: '100%' }} min={0}
                   formatter={(v) => v ? `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',') : ''}
@@ -503,7 +552,34 @@ export default function Investments() {
 
           <Row gutter={16}>
             <Col span={8}>
-              <Form.Item name="number_of_shares" label="Number of Shares">
+              <Form.Item
+                name="number_of_shares"
+                label={
+                  <Space size={4}>
+                    <span>Number of Shares</span>
+                    {capShares !== null && capShares >= 0 && (
+                      <Tag color={capShares > 0 ? 'blue' : 'red'} style={{ fontSize: 10, marginLeft: 4 }}>
+                        max {capShares.toLocaleString()}
+                      </Tag>
+                    )}
+                  </Space>
+                }
+                rules={[
+                  {
+                    validator: (_, v) => {
+                      if (v == null) return Promise.resolve();
+                      if (capShares !== null && capShares >= 0 && v > capShares) {
+                        return Promise.reject(new Error(
+                          selectedAlloc
+                            ? `Exceeds allocation cap. Max for ${selectedAlloc.allocation_no}: ${capShares.toLocaleString()} shares`
+                            : `Exceeds remaining unallocated. Max: ${capShares.toLocaleString()} shares`
+                        ));
+                      }
+                      return Promise.resolve();
+                    },
+                  },
+                ]}
+              >
                 <InputNumber style={{ width: '100%' }} min={0} precision={0} onChange={handleSharesChange} />
               </Form.Item>
             </Col>

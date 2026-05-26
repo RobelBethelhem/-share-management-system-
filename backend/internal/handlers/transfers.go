@@ -151,19 +151,36 @@ func CreateTransfer(c *gin.Context) {
 			database.DB.Model(&models.ShareBlock{}).
 				Where("allocation_id = ? AND is_released = ?", alloc.ID, false).
 				Select("COALESCE(SUM(block_shares), 0)").Scan(&totalBlocked)
-			totalFree := alloc.AllocatedShares - totalBlocked
+
+			// PENDING outgoing transfers from THIS allocation — they reserve
+			// capacity even though they haven't been executed yet. Without this,
+			// two pending transfers can both pass the per-line check against
+			// the same paid pool, and double-spend happens on approval.
+			var pendingPaidOut, pendingUnpaidOut int64
+			database.DB.Table("transfer_lines").
+				Joins("JOIN transfers ON transfers.id = transfer_lines.transfer_id").
+				Where("transfer_lines.from_allocation_id = ? AND transfers.approval_status = ?",
+					alloc.ID, "pending").
+				Select("COALESCE(SUM(transfer_lines.paid_shares_to_transfer), 0)").Scan(&pendingPaidOut)
+			database.DB.Table("transfer_lines").
+				Joins("JOIN transfers ON transfers.id = transfer_lines.transfer_id").
+				Where("transfer_lines.from_allocation_id = ? AND transfers.approval_status = ?",
+					alloc.ID, "pending").
+				Select("COALESCE(SUM(transfer_lines.unpaid_shares_to_transfer), 0)").Scan(&pendingUnpaidOut)
+
+			totalFree := alloc.AllocatedShares - totalBlocked - pendingPaidOut - pendingUnpaidOut
 			if totalFree < 0 {
 				totalFree = 0
 			}
 
-			availPaid := srcPaidShares - effPaidBlocked
+			availPaid := srcPaidShares - effPaidBlocked - pendingPaidOut
 			if availPaid < 0 {
 				availPaid = 0
 			}
 			if availPaid > totalFree {
 				availPaid = totalFree
 			}
-			availUnpaid := srcUnpaidShares - effUnpaidBlocked
+			availUnpaid := srcUnpaidShares - effUnpaidBlocked - pendingUnpaidOut
 			if availUnpaid < 0 {
 				availUnpaid = 0
 			}
@@ -173,21 +190,21 @@ func CreateTransfer(c *gin.Context) {
 
 			if line.PaidSharesToTransfer > availPaid {
 				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf(
-					"Allocation %d: paid shares to transfer (%d) exceeds available paid shares (%d — %d paid minus %d blocked)",
-					line.FromAllocationID, line.PaidSharesToTransfer, availPaid, srcPaidShares, effPaidBlocked)})
+					"Allocation %d: paid shares to transfer (%d) exceeds available paid (%d — %d paid − %d blocked − %d already pending in other transfers)",
+					line.FromAllocationID, line.PaidSharesToTransfer, availPaid, srcPaidShares, effPaidBlocked, pendingPaidOut)})
 				return
 			}
 			if line.UnpaidSharesToTransfer > availUnpaid {
 				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf(
-					"Allocation %d: unpaid shares to transfer (%d) exceeds available unpaid shares (%d — %d unpaid minus %d blocked)",
-					line.FromAllocationID, line.UnpaidSharesToTransfer, availUnpaid, srcUnpaidShares, effUnpaidBlocked)})
+					"Allocation %d: unpaid shares to transfer (%d) exceeds available unpaid (%d — %d unpaid − %d blocked − %d already pending in other transfers)",
+					line.FromAllocationID, line.UnpaidSharesToTransfer, availUnpaid, srcUnpaidShares, effUnpaidBlocked, pendingUnpaidOut)})
 				return
 			}
 			totalLineRequested := line.PaidSharesToTransfer + line.UnpaidSharesToTransfer
 			if totalLineRequested > totalFree {
 				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf(
-					"Allocation %d: total shares to transfer (%d) exceeds total free shares (%d — %d allocated minus %d blocked)",
-					line.FromAllocationID, totalLineRequested, totalFree, alloc.AllocatedShares, totalBlocked)})
+					"Allocation %d: total shares to transfer (%d) exceeds total free (%d — %d allocated − %d blocked − %d already pending)",
+					line.FromAllocationID, totalLineRequested, totalFree, alloc.AllocatedShares, totalBlocked, pendingPaidOut+pendingUnpaidOut)})
 				return
 			}
 			totalPaid += line.PaidSharesToTransfer
@@ -211,6 +228,28 @@ func CreateTransfer(c *gin.Context) {
 			if a.AllocatedShares > paid {
 				currentUnpaidTotal += a.AllocatedShares - paid
 			}
+		}
+		// Subtract everything already reserved by OTHER pending transfers from
+		// this transferor — the anchor rule has to see the post-pending state,
+		// not just the post-approved state.
+		var pendingPaidAcross, pendingUnpaidAcross int64
+		database.DB.Table("transfer_lines").
+			Joins("JOIN transfers ON transfers.id = transfer_lines.transfer_id").
+			Where("transfers.transferor_id = ? AND transfers.approval_status = ?",
+				input.TransferorID, "pending").
+			Select("COALESCE(SUM(transfer_lines.paid_shares_to_transfer), 0)").Scan(&pendingPaidAcross)
+		database.DB.Table("transfer_lines").
+			Joins("JOIN transfers ON transfers.id = transfer_lines.transfer_id").
+			Where("transfers.transferor_id = ? AND transfers.approval_status = ?",
+				input.TransferorID, "pending").
+			Select("COALESCE(SUM(transfer_lines.unpaid_shares_to_transfer), 0)").Scan(&pendingUnpaidAcross)
+		currentPaidTotal -= pendingPaidAcross
+		currentUnpaidTotal -= pendingUnpaidAcross
+		if currentPaidTotal < 0 {
+			currentPaidTotal = 0
+		}
+		if currentUnpaidTotal < 0 {
+			currentUnpaidTotal = 0
 		}
 		paidAfter := currentPaidTotal - totalPaid
 		unpaidAfter := currentUnpaidTotal - totalUnpaid
@@ -358,6 +397,54 @@ func RunTransferApproval(transferID uint) error {
 	var transfer models.Transfer
 	if err := database.DB.Preload("Lines").First(&transfer, transferID).Error; err != nil {
 		return err
+	}
+
+	// Re-validate per-line availability against CURRENT state. Catches the
+	// race where T1 + T2 both passed the create-time check independently,
+	// then T1 was approved first and ate the shared paid pool. Without this,
+	// approving T2 would silently drive the allocation's effective paid
+	// count negative.
+	for _, line := range transfer.Lines {
+		var alloc models.Allocation
+		if err := database.DB.First(&alloc, line.FromAllocationID).Error; err != nil {
+			return fmt.Errorf("approval failed: allocation %d not found", line.FromAllocationID)
+		}
+		srcPaid := computeAllocPaidShares(transfer.TransferorID, alloc.ID)
+		srcUnpaid := alloc.AllocatedShares - srcPaid
+		effPaidBlocked := getEffectivePaidBlocked(alloc.ID)
+		effUnpaidBlocked := getEffectiveUnpaidBlocked(alloc.ID)
+
+		// Pending shares reserved by OTHER pending transfers (not this one).
+		var pendingPaidOther, pendingUnpaidOther int64
+		database.DB.Table("transfer_lines").
+			Joins("JOIN transfers ON transfers.id = transfer_lines.transfer_id").
+			Where("transfer_lines.from_allocation_id = ? AND transfers.id != ? AND transfers.approval_status = ?",
+				alloc.ID, transferID, "pending").
+			Select("COALESCE(SUM(transfer_lines.paid_shares_to_transfer), 0)").Scan(&pendingPaidOther)
+		database.DB.Table("transfer_lines").
+			Joins("JOIN transfers ON transfers.id = transfer_lines.transfer_id").
+			Where("transfer_lines.from_allocation_id = ? AND transfers.id != ? AND transfers.approval_status = ?",
+				alloc.ID, transferID, "pending").
+			Select("COALESCE(SUM(transfer_lines.unpaid_shares_to_transfer), 0)").Scan(&pendingUnpaidOther)
+
+		availPaid := srcPaid - effPaidBlocked - pendingPaidOther
+		if availPaid < 0 {
+			availPaid = 0
+		}
+		availUnpaid := srcUnpaid - effUnpaidBlocked - pendingUnpaidOther
+		if availUnpaid < 0 {
+			availUnpaid = 0
+		}
+		if line.PaidSharesToTransfer > availPaid {
+			return fmt.Errorf(
+				"approval blocked: allocation %s — paid shares to transfer (%d) exceeds currently available (%d). Another transfer was approved between create and now, eating this allocation's paid capacity. Reject this transfer or wait until the prior approvals settle.",
+				alloc.AllocationNo, line.PaidSharesToTransfer, availPaid)
+		}
+		if line.UnpaidSharesToTransfer > availUnpaid {
+			return fmt.Errorf(
+				"approval blocked: allocation %s — unpaid shares to transfer (%d) exceeds currently available (%d).",
+				alloc.AllocationNo, line.UnpaidSharesToTransfer, availUnpaid)
+		}
 	}
 
 	return database.DB.Transaction(func(tx *gorm.DB) error {

@@ -266,7 +266,6 @@ export default function Investments() {
   ];
 
   const columns = [
-    { title: 'ID', dataIndex: 'id', width: 55 },
     { title: 'Sh. ID', key: 'shid', width: 75, render: (_, r) => r.shareholder_id ?? r.shareholder?.id ?? '-' },
     {
       title: 'Shareholder', key: 'sh',
@@ -487,14 +486,45 @@ export default function Investments() {
 
           <Row gutter={16}>
             <Col span={12}>
-              <Form.Item name="from_account" label="From Account / CPO No"
-                tooltip="Bank account, CPO number, or transfer reference">
-                <Input placeholder="Account no or reference..." />
+              {/* Label/placeholder of the From-Account field changes based on
+                  Payment Method so the operator types the right value for the
+                  chosen channel. The underlying field is still `from_account`
+                  (a free-text string), so no backend / schema change. */}
+              <Form.Item dependencies={['payment_method']} noStyle>
+                {({ getFieldValue }) => {
+                  const m = getFieldValue('payment_method');
+                  const cfg = {
+                    cash:          { label: 'Received By / Branch',  placeholder: 'Cashier name or branch…',         tooltip: 'Who received the cash, or which branch.' },
+                    bank_transfer: { label: 'From Bank Account',     placeholder: 'Bank name + account no…',          tooltip: 'Originating bank + account that wired the funds.' },
+                    check:         { label: 'Check Drawer / Bank',   placeholder: 'Drawer name or issuing bank…',     tooltip: 'Who signed the check / which bank issued it.' },
+                    cpo:           { label: 'CPO Issuer / Bank',     placeholder: 'CPO issuing bank…',                tooltip: 'Which bank issued the CPO.' },
+                    dividend:      { label: 'From Dividend',         placeholder: 'Auto-linked dividend',             tooltip: 'Source dividend (linked automatically when reinvesting).' },
+                  }[m] || { label: 'From Account / CPO No', placeholder: 'Account no or reference…', tooltip: 'Bank account, CPO number, or transfer reference.' };
+                  return (
+                    <Form.Item name="from_account" label={cfg.label} tooltip={cfg.tooltip}>
+                      <Input placeholder={cfg.placeholder} />
+                    </Form.Item>
+                  );
+                }}
               </Form.Item>
             </Col>
             <Col span={12}>
-              <Form.Item name="reference_no" label="Bank Reference No">
-                <Input placeholder="Bank slip / receipt no..." />
+              <Form.Item dependencies={['payment_method']} noStyle>
+                {({ getFieldValue }) => {
+                  const m = getFieldValue('payment_method');
+                  const cfg = {
+                    cash:          { label: 'Receipt No',         placeholder: 'Cash receipt no…' },
+                    bank_transfer: { label: 'Bank Reference No',  placeholder: 'Bank slip / transaction id…' },
+                    check:         { label: 'Check No',           placeholder: 'Check number…' },
+                    cpo:           { label: 'CPO No',             placeholder: 'CPO number…' },
+                    dividend:      { label: 'Dividend Ref',       placeholder: 'Auto-set' },
+                  }[m] || { label: 'Bank Reference No', placeholder: 'Bank slip / receipt no…' };
+                  return (
+                    <Form.Item name="reference_no" label={cfg.label}>
+                      <Input placeholder={cfg.placeholder} />
+                    </Form.Item>
+                  );
+                }}
               </Form.Item>
             </Col>
           </Row>

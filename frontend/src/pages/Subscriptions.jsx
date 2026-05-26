@@ -245,7 +245,6 @@ export default function Subscriptions() {
   const approvalColors = { pending: 'orange', approved: 'green', rejected: 'red' };
 
   const columns = [
-    { title: 'ID', dataIndex: 'id', width: 60 },
     {
       title: 'Sh. ID', key: 'shid', width: 75,
       render: (_, r) => r.shareholder_id ?? r.shareholder?.id ?? '-',

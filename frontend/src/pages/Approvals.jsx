@@ -299,6 +299,14 @@ function TransferBody({ detail }) {
         <Descriptions.Item label="Par Value">{formatETB(detail.par_value)}</Descriptions.Item>
         <Descriptions.Item label="Transfer Amount"><Text strong>{formatETB(detail.transfer_amount)}</Text></Descriptions.Item>
         <Descriptions.Item label="Transfer Date">{fmtDate(detail.transfer_date)}</Descriptions.Item>
+        <Descriptions.Item label="Dividend From-Date (agreed)">
+          {detail.agreed_dividend_date
+            ? <Tag color="gold">{fmtDate(detail.agreed_dividend_date)}</Tag>
+            : <Text type="secondary">— not specified —</Text>}
+        </Descriptions.Item>
+        {detail.dividend_issued_date && (
+          <Descriptions.Item label="Dividend Issued Date">{fmtDate(detail.dividend_issued_date)}</Descriptions.Item>
+        )}
         <Descriptions.Item label="Full Transfer">{detail.is_full_transfer ? 'Yes' : 'No'}</Descriptions.Item>
         <Descriptions.Item label="Include Subscribed">{detail.include_subscribed ? 'Yes' : 'No'}</Descriptions.Item>
         {detail.reason && <Descriptions.Item label="Reason" span={2}>{detail.reason}</Descriptions.Item>}

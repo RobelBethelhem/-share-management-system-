@@ -292,6 +292,33 @@ export default function Transfers() {
         };
       });
 
+    // Anchor rule: if the transferor still has unpaid shares after this
+    // transfer, they must retain at least 1 paid share. Backend re-enforces
+    // this — but failing fast here gives a clearer error in context.
+    const allocs = transferorSummary?.allocations || [];
+    let currentPaid = 0;
+    let currentUnpaid = 0;
+    for (const a of allocs) {
+      const p = a.paid_shares || 0;
+      const u = Math.max(0, (a.allocated_shares || 0) - p);
+      currentPaid += p;
+      currentUnpaid += u;
+    }
+    const paidToTransfer = lines.reduce((s, l) => s + (l.paid_shares_to_transfer || 0), 0);
+    const unpaidToTransfer = lines.reduce((s, l) => s + (l.unpaid_shares_to_transfer || 0), 0);
+    const paidAfter = currentPaid - paidToTransfer;
+    const unpaidAfter = currentUnpaid - unpaidToTransfer;
+    if (unpaidAfter > 0 && paidAfter < 1) {
+      const maxPaid = Math.max(0, currentPaid - 1);
+      message.error(
+        `Transfer would leave the shareholder with 0 paid + ${unpaidAfter.toLocaleString()} unpaid shares. ` +
+        `At least 1 paid share must remain while any unpaid shares exist. ` +
+        `Reduce paid transfer to at most ${maxPaid.toLocaleString()}, or also transfer the remaining ${unpaidAfter.toLocaleString()} unpaid shares.`,
+        8,
+      );
+      return;
+    }
+
     const payload = {
       transferor_id:        values.transferor_id,
       transferee_id:        values.transferee_id,

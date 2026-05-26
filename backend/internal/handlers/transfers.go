@@ -193,6 +193,48 @@ func CreateTransfer(c *gin.Context) {
 			totalPaid += line.PaidSharesToTransfer
 			totalUnpaid += line.UnpaidSharesToTransfer
 		}
+
+		// Anchor rule: a shareholder who still has unpaid shares somewhere
+		// after this transfer must retain at least 1 paid share. Otherwise
+		// the unpaid ownership has no paid anchor in the register.
+		//
+		//   60 paid + 40 unpaid, transfer 60 paid → 0 paid + 40 unpaid → REJECT
+		//   60 paid +  0 unpaid, transfer 60 paid → 0 paid +  0 unpaid → OK
+		//   Alloc1: 60p/0u, Alloc2: 100p/50u; transfer 100p from Alloc2 →
+		//     60 paid + 50 unpaid remaining → OK (Alloc1 still has 60 paid)
+		var transferorAllocs []models.Allocation
+		database.DB.Where("shareholder_id = ?", input.TransferorID).Find(&transferorAllocs)
+		var currentPaidTotal, currentUnpaidTotal int64
+		for _, a := range transferorAllocs {
+			paid := computeAllocPaidShares(input.TransferorID, a.ID)
+			currentPaidTotal += paid
+			if a.AllocatedShares > paid {
+				currentUnpaidTotal += a.AllocatedShares - paid
+			}
+		}
+		paidAfter := currentPaidTotal - totalPaid
+		unpaidAfter := currentUnpaidTotal - totalUnpaid
+		if unpaidAfter > 0 && paidAfter < 1 {
+			maxPaid := currentPaidTotal - 1
+			if maxPaid < 0 {
+				maxPaid = 0
+			}
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": fmt.Sprintf(
+					"Transfer would leave the shareholder with 0 paid shares but %d unpaid shares remaining. "+
+						"At least 1 paid share must stay with the shareholder while any unpaid shares exist. "+
+						"Reduce paid shares to at most %d, or also transfer the remaining %d unpaid shares.",
+					unpaidAfter, maxPaid, unpaidAfter,
+				),
+				"current_paid":   currentPaidTotal,
+				"current_unpaid": currentUnpaidTotal,
+				"paid_after":     paidAfter,
+				"unpaid_after":   unpaidAfter,
+				"max_paid":       maxPaid,
+			})
+			return
+		}
+
 		// Validate ToAllocationID belongs to transferee
 		if input.ToAllocationID != nil {
 			var dest models.Allocation

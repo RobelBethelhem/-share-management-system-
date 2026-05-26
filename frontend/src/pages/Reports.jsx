@@ -22,6 +22,7 @@ const reportGroups = [
     label: 'General Reports',
     options: [
       { value: 'age', label: 'Age Report (by min/max age)' },
+      { value: 'sex', label: 'By Sex Report (gender breakdown)' },
     ],
   },
   {
@@ -67,6 +68,7 @@ const reportGroups = [
 const dateFilterReports = ['investments', 'transfers', 'service-charges', 'daily-schedules'];
 const fiscalYearReports = ['dividends', 'dividend-tax'];
 const ageFilterReports = ['age'];
+const sexFilterReports = ['sex'];
 
 // Shared style for section titles in the on-screen Individual Statement so
 // the headings (Investments / Dividends / Transfers / etc.) match the
@@ -91,6 +93,7 @@ export default function Reports() {
   const [dateRange, setDateRange] = useState(null);
   const [minAge, setMinAge] = useState(18);
   const [maxAge, setMaxAge] = useState(80);
+  const [genderFilter, setGenderFilter] = useState(''); // '' = all
   const [fiscalYear, setFiscalYear] = useState('');
   // Fiscal-year options are populated from the real DividendSetting rows
   // — not hardcoded — so the dropdown reflects what actually exists in the
@@ -201,6 +204,9 @@ export default function Reports() {
       if (ageFilterReports.includes(reportType)) {
         params.min_age = minAge ?? 0;
         params.max_age = maxAge ?? 150;
+      }
+      if (sexFilterReports.includes(reportType) && genderFilter) {
+        params.gender = genderFilter;
       }
       const res = await getReport(reportType, params);
       const resultData = res.data.data || [];
@@ -760,6 +766,28 @@ export default function Reports() {
           { title: 'Total Shares', dataIndex: 'total_shares', render: (v) => formatNumber(v) },
           { title: 'Total Invested', dataIndex: 'total_invested', render: (v) => formatCurrency(v) },
         ];
+      case 'sex':
+        return [
+          { title: 'Account', dataIndex: 'account_no', width: 100 },
+          { title: 'Name', key: 'name', render: (_, r) =>
+            `${r.first_name || ''} ${r.middle_name || ''} ${r.last_name || ''}`.replace(/\s+/g, ' ').trim() },
+          { title: 'Gender', dataIndex: 'gender', width: 110,
+            render: (v) => {
+              const g = (v || '').toLowerCase().trim();
+              const color = g === 'female' ? 'magenta' : g === 'male' ? 'blue' : g === 'other' ? 'purple' : 'default';
+              return <Tag color={color}>{v || 'unspecified'}</Tag>;
+            } },
+          { title: 'Type', dataIndex: 'shareholder_type', width: 110 },
+          { title: 'Phone', dataIndex: 'phone', width: 120, render: (v) => v || '—' },
+          { title: 'Date of Birth', dataIndex: 'date_of_birth', width: 120,
+            render: (v) => v ? dayjs(v).format('YYYY-MM-DD') : '—' },
+          { title: 'Total Shares', dataIndex: 'total_shares', width: 120, align: 'right',
+            render: (v) => formatNumber(v) },
+          { title: 'Total Invested', dataIndex: 'total_invested', width: 140, align: 'right',
+            render: (v) => formatCurrency(v) },
+          { title: 'Status', dataIndex: 'status', width: 90,
+            render: (v) => <Tag color={v === 'active' ? 'green' : 'default'}>{v}</Tag> },
+        ];
       case 'age':
         return [
           { title: 'Account', dataIndex: 'account_no', width: 100 },
@@ -1217,6 +1245,21 @@ export default function Reports() {
       items.push({ title: 'Active Blocked', value: summary.active_blocked });
       items.push({ title: 'Total Blocked (all)', value: summary.total_blocked });
     }
+    // Sex / gender breakdown summary
+    if (summary.counts !== undefined && summary.shares_by_gender !== undefined) {
+      if (summary.male_count > 0) {
+        items.push({ title: 'Male', value: summary.male_count, valueStyle: { color: '#1677ff' } });
+      }
+      if (summary.female_count > 0) {
+        items.push({ title: 'Female', value: summary.female_count, valueStyle: { color: '#eb2f96' } });
+      }
+      if (summary.other_count > 0) {
+        items.push({ title: 'Other', value: summary.other_count, valueStyle: { color: '#722ed1' } });
+      }
+      if (summary.unspecified_count > 0) {
+        items.push({ title: 'Unspecified', value: summary.unspecified_count, valueStyle: { color: '#8c8c8c' } });
+      }
+    }
     // Age report summary
     if (summary.average_age !== undefined) {
       items.push({ title: 'Avg Age', value: summary.average_age, precision: 1, suffix: ' yrs' });
@@ -1293,6 +1336,24 @@ export default function Reports() {
                           addonBefore="Max"
                         />
                       </Space.Compact>
+                    </Col>
+                  )}
+
+                  {sexFilterReports.includes(reportType) && (
+                    <Col xs={24} md={4}>
+                      <Select
+                        placeholder="All genders"
+                        style={{ width: '100%' }}
+                        allowClear
+                        value={genderFilter || undefined}
+                        onChange={(v) => setGenderFilter(v || '')}
+                        options={[
+                          { value: 'male', label: 'Male' },
+                          { value: 'female', label: 'Female' },
+                          { value: 'other', label: 'Other' },
+                          { value: 'unspecified', label: 'Unspecified (no value)' },
+                        ]}
+                      />
                     </Col>
                   )}
 

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"share-management-system/internal/database"
@@ -911,5 +912,82 @@ func AgeReport(c *gin.Context) {
 		"age_buckets":              buckets,
 		"shareholders_without_dob": withoutDOB,
 		"shareholders_out_of_range": outOfRange,
+	})
+}
+
+// SexReport returns active shareholders filtered by gender, with per-row
+// shares + investment totals and a per-gender rollup in the summary so
+// the operator can see the distribution at a glance.
+//
+// Query params:
+//   gender  optional; one of "male", "female", "other", "unspecified".
+//           Empty/unrecognized = return every active shareholder and let
+//           the rollup show the full breakdown.
+//
+// The handler normalizes the gender field on each shareholder (lowercase,
+// trim) before bucketing so legacy values like "Male"/"FEMALE"/" male "
+// land in the right bucket. Empty/null genders go into "unspecified".
+func SexReport(c *gin.Context) {
+	gender := strings.ToLower(strings.TrimSpace(c.DefaultQuery("gender", "")))
+
+	q := database.DB.Where("status = ?", "active")
+	if gender == "unspecified" {
+		q = q.Where("gender =  OR gender IS NULL")
+	} else if gender == "male" || gender == "female" || gender == "other" {
+		q = q.Where("LOWER(TRIM(gender)) = ?", gender)
+	}
+	var shareholders []models.Shareholder
+	q.Order("id ASC").Find(&shareholders)
+
+	type SexEntry struct {
+		models.Shareholder
+		TotalShares   int64   `json:"total_shares"`
+		TotalInvested float64 `json:"total_invested"`
+	}
+
+	counts := map[string]int{"male": 0, "female": 0, "other": 0, "unspecified": 0}
+	shares := map[string]int64{"male": 0, "female": 0, "other": 0, "unspecified": 0}
+	invested := map[string]float64{"male": 0, "female": 0, "other": 0, "unspecified": 0}
+
+	entries := []SexEntry{}
+	for _, sh := range shareholders {
+		var totalShares int64
+		var totalInvested float64
+		database.DB.Model(&models.Investment{}).
+			Where("shareholder_id = ? AND status = 'active' AND approval_status = 'approved'", sh.ID).
+			Select("COALESCE(SUM(number_of_shares), 0)").Scan(&totalShares)
+		database.DB.Model(&models.Investment{}).
+			Where("shareholder_id = ? AND status = 'active' AND approval_status = 'approved'", sh.ID).
+			Select("COALESCE(SUM(amount), 0)").Scan(&totalInvested)
+
+		key := strings.ToLower(strings.TrimSpace(sh.Gender))
+		if key == "" {
+			key = "unspecified"
+		}
+		if key != "male" && key != "female" && key != "other" && key != "unspecified" {
+			key = "other"
+		}
+		counts[key]++
+		shares[key] += totalShares
+		invested[key] += totalInvested
+
+		entries = append(entries, SexEntry{
+			Shareholder:   sh,
+			TotalShares:   totalShares,
+			TotalInvested: totalInvested,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"data":               entries,
+		"total":              len(entries),
+		"gender_filter":      gender,
+		"counts":             counts,
+		"shares_by_gender":   shares,
+		"invested_by_gender": invested,
+		"male_count":         counts["male"],
+		"female_count":       counts["female"],
+		"other_count":        counts["other"],
+		"unspecified_count":  counts["unspecified"],
 	})
 }

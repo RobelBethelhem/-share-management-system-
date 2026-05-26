@@ -79,6 +79,29 @@ export default function Dividends() {
   const [subDist, setSubDist] = useState({}); // { [allocation_id]: shares }
   const [subAllocLoading, setSubAllocLoading] = useState(false);
 
+  // Per-row action lock: prevents a double-click on Collect/Block/Release/
+  // Transfer/Subscribe from firing the same request twice while the server
+  // is still working. Map { [dividendId+action]: true }.
+  const [actionLocks, setActionLocks] = useState({});
+  const lockKey = (id, action) => `${id}:${action}`;
+  const isLocked = (id, action) => !!actionLocks[lockKey(id, action)];
+  const withLock = async (id, action, fn) => {
+    const k = lockKey(id, action);
+    if (actionLocks[k]) return; // already in flight, ignore the extra click
+    setActionLocks(prev => ({ ...prev, [k]: true }));
+    try {
+      await fn();
+    } finally {
+      // Hold the lock for an extra 5s after the request finishes so a fast
+      // server response doesn't immediately allow a fat-finger second submit.
+      setTimeout(() => setActionLocks(prev => {
+        const next = { ...prev };
+        delete next[k];
+        return next;
+      }), 5000);
+    }
+  };
+
   // Excel export state
   const [exportModal, setExportModal] = useState(false);
   const [exportScope, setExportScope] = useState('current'); // 'current' | 'all'
@@ -217,7 +240,14 @@ export default function Dividends() {
     setExpandedCache(prev => { const next = { ...prev }; delete next[dividendId]; return next; });
   };
 
+  // Modal submit guard: lock for 5s per modal so a flaky network + impatient
+  // operator can't fire the same Collect / Transfer twice.
+  const [collectSubmitting, setCollectSubmitting] = useState(false);
+  const [transferSubmitting, setTransferSubmitting] = useState(false);
+
   const handleCollect = async (values) => {
+    if (collectSubmitting) return;
+    setCollectSubmitting(true);
     try {
       await collectDividend(collectModal.id, values);
       message.success('Dividend collected');
@@ -227,6 +257,7 @@ export default function Dividends() {
     } catch (err) {
       message.error(err.response?.data?.error || 'Failed');
     }
+    setTimeout(() => setCollectSubmitting(false), 5000);
   };
 
   const handleBlock = async (id) => {
@@ -244,15 +275,18 @@ export default function Dividends() {
   };
 
   const handleTransfer = async (values) => {
+    if (transferSubmitting) return;
+    setTransferSubmitting(true);
     try {
       await transferDividend(transferModal.id, values);
-      message.success('Dividend transfer recorded');
+      message.success('Transfer request queued for authorization');
       refreshExpanded(transferModal.id);
       setTransferModal(null);
       fetchData();
     } catch (err) {
       message.error(err.response?.data?.error || 'Failed');
     }
+    setTimeout(() => setTransferSubmitting(false), 5000);
   };
 
   // Opens the Subscribe / Reinvest modal AND eagerly fetches the
@@ -411,18 +445,28 @@ export default function Dividends() {
           (reinvestable <= 0.005 && (r.uncollected_amount || 0) <= 0.005)
         );
 
-        // Strict rule: when blocked → only Release. No Subscribe / Collect /
-        // Transfer is allowed until the block is cleared.
+        // Pending-transfer trumps every other action. Operator must wait
+        // for the Authorization tab to approve or reject before this row
+        // is interactable again.
+        if (r.is_transfer_pending) {
+          return <Tag color="orange" style={{ fontSize: 11 }}>Transfer pending approval</Tag>;
+        }
+
+        // Strict rule: when blocked → only Release. Block button gone
+        // until the block is cleared.
         if (r.is_blocked) {
           return (
             <Space wrap>
-              <Button size="small" onClick={() => handleRelease(r.id)}>Release</Button>
+              <Button size="small"
+                loading={isLocked(r.id, 'release')}
+                disabled={isLocked(r.id, 'release')}
+                onClick={() => withLock(r.id, 'release', () => handleRelease(r.id))}>
+                Release
+              </Button>
             </Space>
           );
         }
 
-        // Strict rule: when fully consumed (collected / transferred / settled)
-        // → no action buttons at all. The dividend is closed.
         if (fullyConsumed) {
           return <Text type="secondary" style={{ fontSize: 11 }}>—</Text>;
         }
@@ -431,20 +475,35 @@ export default function Dividends() {
           <Space wrap>
             {reinvestable > 0 && (
               <Button size="small" type="primary" icon={<RiseOutlined />}
-                onClick={() => openSubscribeModal(r, reinvestable)}>
+                loading={isLocked(r.id, 'subscribe')}
+                disabled={isLocked(r.id, 'subscribe')}
+                onClick={() => withLock(r.id, 'subscribe', () => openSubscribeModal(r, reinvestable))}>
                 Subscribe
               </Button>
             )}
             {r.uncollected_amount > 0 && (
-              <Button size="small" onClick={() => {
-                setCollectModal(r);
-                form.setFieldsValue({ amount: r.uncollected_amount, payment_method: 'cash' });
-              }}>Collect</Button>
+              <Button size="small"
+                loading={isLocked(r.id, 'collect')}
+                disabled={isLocked(r.id, 'collect')}
+                onClick={() => {
+                  setCollectModal(r);
+                  form.setFieldsValue({ amount: r.uncollected_amount, payment_method: 'cash' });
+                }}>Collect</Button>
             )}
-            <Popconfirm title="Block dividend?" onConfirm={() => handleBlock(r.id)}>
-              <Button size="small" danger>Block</Button>
+            <Popconfirm title="Block dividend?"
+              onConfirm={() => withLock(r.id, 'block', () => handleBlock(r.id))}>
+              <Button size="small" danger
+                loading={isLocked(r.id, 'block')}
+                disabled={isLocked(r.id, 'block')}>
+                Block
+              </Button>
             </Popconfirm>
-            <Button size="small" onClick={() => { setTransferModal(r); transferForm.resetFields(); }}>Transfer</Button>
+            <Button size="small"
+              loading={isLocked(r.id, 'transfer')}
+              disabled={isLocked(r.id, 'transfer')}
+              onClick={() => { setTransferModal(r); transferForm.resetFields(); }}>
+              Transfer
+            </Button>
           </Space>
         );
       },
@@ -898,7 +957,10 @@ export default function Dividends() {
           <Form.Item style={{ textAlign: 'right' }}>
             <Space>
               <Button onClick={() => setCollectModal(null)}>Cancel</Button>
-              <Button type="primary" htmlType="submit">Collect</Button>
+              <Button type="primary" htmlType="submit"
+                loading={collectSubmitting} disabled={collectSubmitting}>
+                Collect
+              </Button>
             </Space>
           </Form.Item>
         </Form>
@@ -918,7 +980,10 @@ export default function Dividends() {
           <Form.Item style={{ textAlign: 'right' }}>
             <Space>
               <Button onClick={() => setTransferModal(null)}>Cancel</Button>
-              <Button type="primary" htmlType="submit">Transfer</Button>
+              <Button type="primary" htmlType="submit"
+                loading={transferSubmitting} disabled={transferSubmitting}>
+                Send for Approval
+              </Button>
             </Space>
           </Form.Item>
         </Form>

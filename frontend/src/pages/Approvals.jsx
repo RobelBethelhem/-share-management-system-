@@ -433,6 +433,27 @@ function DividendBody({ detail }) {
         {detail.block_reason && <Descriptions.Item label="Block Reason" span={2}>{detail.block_reason}</Descriptions.Item>}
         {detail.remark && <Descriptions.Item label="Remark" span={2}>{detail.remark}</Descriptions.Item>}
       </Descriptions>
+
+      {/* Pending-transfer details — surfaced when this approval is a
+          dividend transfer request. */}
+      {detail.is_transfer_pending && (
+        <Card size="small" title={<Space><SwapOutlined /> Pending Transfer Request</Space>}
+          style={{ background: '#fffbe6', borderColor: '#ffe58f', marginBottom: 12 }}>
+          <Descriptions size="small" column={2} bordered>
+            <Descriptions.Item label="Transfer To" span={2}>
+              <Text strong>{detail.transfer_to || '-'}</Text>
+            </Descriptions.Item>
+            <Descriptions.Item label="Reason">
+              <Tag color="purple">{detail.transfer_reason || '-'}</Tag>
+            </Descriptions.Item>
+            <Descriptions.Item label="Amount to Transfer">
+              <Text strong style={{ color: '#cf1322' }}>
+                {formatETB((detail.gross_dividend || 0) - (detail.reinvested_amount || 0) - (detail.collected_amount || 0))}
+              </Text>
+            </Descriptions.Item>
+          </Descriptions>
+        </Card>
+      )}
     </>
   );
 }

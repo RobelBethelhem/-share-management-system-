@@ -277,6 +277,11 @@ type Dividend struct {
 	IsBlocked         bool       `gorm:"default:false" json:"is_blocked"`
 	BlockReason       string     `gorm:"type:text" json:"block_reason"`
 	IsTransferred     bool       `gorm:"default:false" json:"is_transferred"`
+	// IsTransferPending is set when an admin requests a transfer; the row
+	// goes through the standard Authorization workflow and only flips
+	// IsTransferred=true on approve. TransferTo/TransferReason hold the
+	// requested destination while pending.
+	IsTransferPending bool       `gorm:"default:false" json:"is_transfer_pending"`
 	TransferTo        string     `gorm:"size:200" json:"transfer_to"`
 	TransferReason    string     `gorm:"size:50" json:"transfer_reason"` // inheritance, legal_order
 	IsTaxReturned     bool       `gorm:"default:false" json:"is_tax_returned"`

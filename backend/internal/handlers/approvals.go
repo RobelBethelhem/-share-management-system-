@@ -78,7 +78,31 @@ func ApproveItem(c *gin.Context) {
 	case "block":
 		database.DB.Model(&models.ShareBlock{}).Where("id = ?", approval.EntityID).Update("approval_status", "approved")
 	case "dividend":
-		database.DB.Model(&models.Dividend{}).Where("id = ?", approval.EntityID).Update("approval_status", "approved")
+		if approval.Action == "transfer" {
+			// Execute the pending dividend transfer. Log a final "transfer"
+			// action with the amount that moved hands.
+			var div models.Dividend
+			if err := database.DB.First(&div, approval.EntityID).Error; err == nil {
+				transferAmount := div.GrossDividend - div.ReinvestedAmount - div.CollectedAmount
+				database.DB.Model(&models.Dividend{}).Where("id = ?", approval.EntityID).
+					Updates(map[string]interface{}{
+						"is_transfer_pending": false,
+						"is_transferred":      true,
+						"status":              "transferred",
+					})
+				logDividendAction(database.DB, models.DividendAction{
+					DividendID:    div.ID,
+					ActionType:    "transfer",
+					Amount:        transferAmount,
+					TaxImpact:     div.TaxAmount,
+					Description:   fmt.Sprintf("Transferred to %s (%s) — ETB %.2f", div.TransferTo, div.TransferReason, transferAmount),
+					Remark:        div.TransferReason,
+					ActedByUserID: uid,
+				})
+			}
+		} else {
+			database.DB.Model(&models.Dividend{}).Where("id = ?", approval.EntityID).Update("approval_status", "approved")
+		}
 	case "trade_request":
 		executeTradeApproval(approval.EntityID)
 	case "proxy":
@@ -223,7 +247,31 @@ func ApproveByEntity(c *gin.Context) {
 	case "block":
 		database.DB.Model(&models.ShareBlock{}).Where("id = ?", approval.EntityID).Update("approval_status", "approved")
 	case "dividend":
-		database.DB.Model(&models.Dividend{}).Where("id = ?", approval.EntityID).Update("approval_status", "approved")
+		if approval.Action == "transfer" {
+			// Execute the pending dividend transfer. Log a final "transfer"
+			// action with the amount that moved hands.
+			var div models.Dividend
+			if err := database.DB.First(&div, approval.EntityID).Error; err == nil {
+				transferAmount := div.GrossDividend - div.ReinvestedAmount - div.CollectedAmount
+				database.DB.Model(&models.Dividend{}).Where("id = ?", approval.EntityID).
+					Updates(map[string]interface{}{
+						"is_transfer_pending": false,
+						"is_transferred":      true,
+						"status":              "transferred",
+					})
+				logDividendAction(database.DB, models.DividendAction{
+					DividendID:    div.ID,
+					ActionType:    "transfer",
+					Amount:        transferAmount,
+					TaxImpact:     div.TaxAmount,
+					Description:   fmt.Sprintf("Transferred to %s (%s) — ETB %.2f", div.TransferTo, div.TransferReason, transferAmount),
+					Remark:        div.TransferReason,
+					ActedByUserID: uid,
+				})
+			}
+		} else {
+			database.DB.Model(&models.Dividend{}).Where("id = ?", approval.EntityID).Update("approval_status", "approved")
+		}
 	case "trade_request":
 		executeTradeApproval(approval.EntityID)
 	case "proxy":
@@ -278,7 +326,26 @@ func RejectByEntity(c *gin.Context) {
 	case "block":
 		database.DB.Model(&models.ShareBlock{}).Where("id = ?", approval.EntityID).Updates(rejUpdate)
 	case "dividend":
-		database.DB.Model(&models.Dividend{}).Where("id = ?", approval.EntityID).Updates(rejUpdate)
+		if approval.Action == "transfer" {
+			// Clear the pending transfer state; the dividend stays in its
+			// current ledger position. Log the rejection so the operator
+			// sees it in the action history.
+			database.DB.Model(&models.Dividend{}).Where("id = ?", approval.EntityID).
+				Updates(map[string]interface{}{
+					"is_transfer_pending": false,
+					"transfer_to":         "",
+					"transfer_reason":     "",
+				})
+			logDividendAction(database.DB, models.DividendAction{
+				DividendID:    approval.EntityID,
+				ActionType:    "transfer_rejected",
+				Description:   "Transfer request rejected: " + input.Remark,
+				Remark:        input.Remark,
+				ActedByUserID: uid,
+			})
+		} else {
+			database.DB.Model(&models.Dividend{}).Where("id = ?", approval.EntityID).Updates(rejUpdate)
+		}
 	case "trade_request":
 		database.DB.Model(&models.TradeRequest{}).Where("id = ?", approval.EntityID).Updates(rejStatusUpdate)
 		var rejTrade models.TradeRequest
@@ -338,7 +405,26 @@ func RejectItem(c *gin.Context) {
 	case "block":
 		database.DB.Model(&models.ShareBlock{}).Where("id = ?", approval.EntityID).Updates(rejUpdate)
 	case "dividend":
-		database.DB.Model(&models.Dividend{}).Where("id = ?", approval.EntityID).Updates(rejUpdate)
+		if approval.Action == "transfer" {
+			// Clear the pending transfer state; the dividend stays in its
+			// current ledger position. Log the rejection so the operator
+			// sees it in the action history.
+			database.DB.Model(&models.Dividend{}).Where("id = ?", approval.EntityID).
+				Updates(map[string]interface{}{
+					"is_transfer_pending": false,
+					"transfer_to":         "",
+					"transfer_reason":     "",
+				})
+			logDividendAction(database.DB, models.DividendAction{
+				DividendID:    approval.EntityID,
+				ActionType:    "transfer_rejected",
+				Description:   "Transfer request rejected: " + input.Remark,
+				Remark:        input.Remark,
+				ActedByUserID: uid,
+			})
+		} else {
+			database.DB.Model(&models.Dividend{}).Where("id = ?", approval.EntityID).Updates(rejUpdate)
+		}
 	case "trade_request":
 		database.DB.Model(&models.TradeRequest{}).Where("id = ?", approval.EntityID).Updates(rejStatusUpdate)
 		var rejTrade models.TradeRequest

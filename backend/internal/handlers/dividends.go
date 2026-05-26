@@ -505,11 +505,20 @@ func CollectDividend(c *gin.Context) {
 	}
 
 	database.DB.Save(&dividend)
+	// Tax impact (informational) = proportional share of the dividend's tax
+	// attributable to this collected slice. The collection is net cash; this
+	// tells the operator how much tax was already withheld upstream for the
+	// portion paid out today. Formula: tax × (this collect ÷ net).
+	var taxImpact float64
+	if dividend.NetDividend > 0 {
+		taxImpact = dividend.TaxAmount * input.Amount / dividend.NetDividend
+	}
 	logDividendAction(database.DB, models.DividendAction{
 		DividendID:    dividend.ID,
 		ActionType:    "collect",
 		Amount:        input.Amount,
-		Description:   fmt.Sprintf("Collected ETB %.2f via %s", input.Amount, input.PaymentMethod),
+		TaxImpact:     taxImpact,
+		Description:   fmt.Sprintf("Collected ETB %.2f via %s (tax withheld ETB %.2f)", input.Amount, input.PaymentMethod, taxImpact),
 		PaymentMethod: input.PaymentMethod,
 		Remark:        input.Remark,
 		ActedByUserID: getUserID(c),
@@ -569,9 +578,7 @@ func TransferDividend(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Dividend not found"})
 		return
 	}
-	// Strict guard: a blocked dividend cannot be transferred. Release the
-	// block first. Same for already-transferred or fully-collected — there's
-	// nothing left in the ledger to hand over.
+	// Strict guards.
 	if dividend.IsBlocked {
 		c.JSON(http.StatusConflict, gin.H{"error": "Dividend is blocked. Release the block before transferring."})
 		return
@@ -580,25 +587,52 @@ func TransferDividend(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "Dividend has already been transferred."})
 		return
 	}
+	if dividend.IsTransferPending {
+		c.JSON(http.StatusConflict, gin.H{"error": "A transfer is already pending approval for this dividend."})
+		return
+	}
 	if dividend.Status == "collected" {
 		c.JSON(http.StatusConflict, gin.H{"error": "Dividend has already been fully collected; nothing left to transfer."})
 		return
 	}
+	// Compute the transferable balance (what's left after reinvest + collect).
+	transferAmount := dividend.GrossDividend - dividend.ReinvestedAmount - dividend.CollectedAmount
+	if transferAmount <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Nothing left to transfer on this dividend."})
+		return
+	}
+
+	// Mark pending and store destination; the actual transfer runs on approve.
+	now := time.Now()
+	uid := getUserID(c)
 	database.DB.Model(&models.Dividend{}).Where("id = ?", id).
 		Updates(map[string]interface{}{
-			"is_transferred":   true,
-			"transfer_to":     input.TransferTo,
-			"transfer_reason": input.Reason,
-			"status":          "transferred",
+			"is_transfer_pending": true,
+			"transfer_to":         input.TransferTo,
+			"transfer_reason":     input.Reason,
 		})
+	database.DB.Create(&models.PendingApproval{
+		EntityType:  "dividend",
+		EntityID:    dividend.ID,
+		Action:      "transfer",
+		RequestedBy: uid,
+		Status:      "pending",
+		RequestedAt: now,
+		Remark:      fmt.Sprintf("To %s (%s) — ETB %.2f", input.TransferTo, input.Reason, transferAmount),
+	})
 	logDividendAction(database.DB, models.DividendAction{
 		DividendID:    dividend.ID,
-		ActionType:    "transfer",
-		Description:   fmt.Sprintf("Transferred to %s (%s)", input.TransferTo, input.Reason),
+		ActionType:    "transfer_requested",
+		Amount:        transferAmount,
+		TaxImpact:     dividend.TaxAmount,
+		Description:   fmt.Sprintf("Transfer to %s (%s) — ETB %.2f, pending approval", input.TransferTo, input.Reason, transferAmount),
 		Remark:        input.Reason,
-		ActedByUserID: getUserID(c),
+		ActedByUserID: uid,
 	})
-	c.JSON(http.StatusOK, gin.H{"message": "Dividend transfer recorded"})
+	c.JSON(http.StatusOK, gin.H{
+		"message":         "Transfer request queued for authorization",
+		"transfer_amount": transferAmount,
+	})
 }
 
 func ReturnDividendTax(c *gin.Context) {

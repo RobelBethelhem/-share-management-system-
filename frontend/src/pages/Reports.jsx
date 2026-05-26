@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect } from 'react';
 import {
   Table, Button, Card, Select, DatePicker, Space, Tag, Tabs, Switch, Tooltip,
   message, Typography, Row, Col, Descriptions, Statistic, Divider, Empty,
+  InputNumber,
 } from 'antd';
 import {
   DownloadOutlined, SearchOutlined, PrinterOutlined,
@@ -17,6 +18,12 @@ const { Title, Text } = Typography;
 const { RangePicker } = DatePicker;
 
 const reportGroups = [
+  {
+    label: 'General Reports',
+    options: [
+      { value: 'age', label: 'Age Report (by min/max age)' },
+    ],
+  },
   {
     label: 'Shareholder Reports',
     options: [
@@ -59,6 +66,7 @@ const reportGroups = [
 // Which reports support which filters
 const dateFilterReports = ['investments', 'transfers', 'service-charges', 'daily-schedules'];
 const fiscalYearReports = ['dividends', 'dividend-tax'];
+const ageFilterReports = ['age'];
 
 // Shared style for section titles in the on-screen Individual Statement so
 // the headings (Investments / Dividends / Transfers / etc.) match the
@@ -81,6 +89,8 @@ export default function Reports() {
   const [loading, setLoading] = useState(false);
   const [summary, setSummary] = useState({});
   const [dateRange, setDateRange] = useState(null);
+  const [minAge, setMinAge] = useState(18);
+  const [maxAge, setMaxAge] = useState(80);
   const [fiscalYear, setFiscalYear] = useState('');
   // Fiscal-year options are populated from the real DividendSetting rows
   // — not hardcoded — so the dropdown reflects what actually exists in the
@@ -187,6 +197,10 @@ export default function Reports() {
       }
       if (fiscalYearReports.includes(reportType) && fiscalYear) {
         params.fiscal_year = fiscalYear;
+      }
+      if (ageFilterReports.includes(reportType)) {
+        params.min_age = minAge ?? 0;
+        params.max_age = maxAge ?? 150;
       }
       const res = await getReport(reportType, params);
       const resultData = res.data.data || [];
@@ -746,6 +760,27 @@ export default function Reports() {
           { title: 'Total Shares', dataIndex: 'total_shares', render: (v) => formatNumber(v) },
           { title: 'Total Invested', dataIndex: 'total_invested', render: (v) => formatCurrency(v) },
         ];
+      case 'age':
+        return [
+          { title: 'Account', dataIndex: 'account_no', width: 100 },
+          { title: 'Name', key: 'name', render: (_, r) =>
+            `${r.first_name || ''} ${r.middle_name || ''} ${r.last_name || ''}`.replace(/\s+/g, ' ').trim() },
+          { title: 'Date of Birth', dataIndex: 'date_of_birth', width: 120,
+            render: (v) => v ? dayjs(v).format('YYYY-MM-DD') : '—' },
+          { title: 'Age', dataIndex: 'age', width: 70, align: 'right',
+            sorter: (a, b) => (a.age || 0) - (b.age || 0),
+            render: (v) => <Text strong>{v}</Text> },
+          { title: 'Gender', dataIndex: 'gender', width: 80,
+            render: (v) => v ? <Tag color={v === 'female' ? 'magenta' : v === 'male' ? 'blue' : 'default'}>{v}</Tag> : '—' },
+          { title: 'Phone', dataIndex: 'phone', width: 120, render: (v) => v || '—' },
+          { title: 'Type', dataIndex: 'shareholder_type', width: 110 },
+          { title: 'Total Shares', dataIndex: 'total_shares', width: 120, align: 'right',
+            render: (v) => formatNumber(v) },
+          { title: 'Total Invested', dataIndex: 'total_invested', width: 140, align: 'right',
+            render: (v) => formatCurrency(v) },
+          { title: 'Status', dataIndex: 'status', width: 90,
+            render: (v) => <Tag color={v === 'active' ? 'green' : 'default'}>{v}</Tag> },
+        ];
       case 'foreign-shareholders':
       case 'registration-book':
         return [
@@ -1182,6 +1217,15 @@ export default function Reports() {
       items.push({ title: 'Active Blocked', value: summary.active_blocked });
       items.push({ title: 'Total Blocked (all)', value: summary.total_blocked });
     }
+    // Age report summary
+    if (summary.average_age !== undefined) {
+      items.push({ title: 'Avg Age', value: summary.average_age, precision: 1, suffix: ' yrs' });
+      items.push({ title: 'Youngest', value: summary.actual_min_age, suffix: ' yrs' });
+      items.push({ title: 'Oldest', value: summary.actual_max_age, suffix: ' yrs' });
+      if (summary.shareholders_without_dob > 0) {
+        items.push({ title: 'No DOB on file', value: summary.shareholders_without_dob, valueStyle: { color: '#cf1322' } });
+      }
+    }
 
     if (!items.length) return null;
 
@@ -1228,6 +1272,27 @@ export default function Reports() {
                     <Col xs={24} md={6}>
                       <RangePicker style={{ width: '100%' }} onChange={setDateRange}
                         placeholder={['Start Date', 'End Date']} />
+                    </Col>
+                  )}
+
+                  {ageFilterReports.includes(reportType) && (
+                    <Col xs={24} md={6}>
+                      <Space.Compact style={{ width: '100%' }}>
+                        <InputNumber
+                          placeholder="Min age" min={0} max={150}
+                          value={minAge}
+                          onChange={(v) => setMinAge(v ?? 0)}
+                          style={{ width: '50%' }}
+                          addonBefore="Min"
+                        />
+                        <InputNumber
+                          placeholder="Max age" min={0} max={150}
+                          value={maxAge}
+                          onChange={(v) => setMaxAge(v ?? 150)}
+                          style={{ width: '50%' }}
+                          addonBefore="Max"
+                        />
+                      </Space.Compact>
                     </Col>
                   )}
 

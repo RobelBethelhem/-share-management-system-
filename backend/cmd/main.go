@@ -378,6 +378,7 @@ func main() {
 			reports.GET("/daily-schedules", handlers.DailySchedulesReport)
 			reports.GET("/influential-shareholders", handlers.InfluentialShareholdersReport)
 			reports.GET("/allocations", handlers.AllocationReport)
+			reports.GET("/age", handlers.AgeReport)
 		}
 
 		// Admin — destructive maintenance endpoints. AdminOnly + body-token guard.

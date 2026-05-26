@@ -791,3 +791,125 @@ func AllocationReport(c *gin.Context) {
 		"total_available": grandAllocated - grandBlocked,
 	})
 }
+
+// AgeReport returns active shareholders filtered by an age range, with a
+// computed age, total paid shares, total invested, plus summary stats
+// (count, average age, actual min/max in result, distribution buckets,
+// and how many shareholders were skipped for missing date_of_birth).
+//
+// Query params (all optional):
+//   min_age  default 0
+//   max_age  default 150
+// Both inclusive. A shareholder whose date_of_birth is null is excluded
+// from the result and counted in shareholders_without_dob so the operator
+// knows their data is incomplete.
+func AgeReport(c *gin.Context) {
+	minAge, _ := strconv.Atoi(c.DefaultQuery("min_age", "0"))
+	maxAge, _ := strconv.Atoi(c.DefaultQuery("max_age", "150"))
+	if minAge < 0 {
+		minAge = 0
+	}
+	if maxAge > 150 {
+		maxAge = 150
+	}
+	if minAge > maxAge {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "min_age cannot exceed max_age"})
+		return
+	}
+
+	var shareholders []models.Shareholder
+	database.DB.Where("status = ?", "active").Find(&shareholders)
+
+	type AgeEntry struct {
+		models.Shareholder
+		Age           int     `json:"age"`
+		TotalShares   int64   `json:"total_shares"`
+		TotalInvested float64 `json:"total_invested"`
+	}
+
+	now := time.Now()
+	entries := []AgeEntry{}
+	withoutDOB := 0
+	outOfRange := 0
+	sumAge := 0
+	actualMin, actualMax := 999, 0
+	buckets := map[string]int{"18-25": 0, "26-35": 0, "36-45": 0, "46-55": 0, "56-65": 0, "66+": 0}
+
+	for _, sh := range shareholders {
+		if sh.DateOfBirth == nil {
+			withoutDOB++
+			continue
+		}
+		dob := *sh.DateOfBirth
+		age := now.Year() - dob.Year()
+		// Birthday not yet reached this year? Subtract 1.
+		if now.YearDay() < dob.YearDay() {
+			age--
+		}
+		if age < 0 {
+			age = 0
+		}
+		if age < minAge || age > maxAge {
+			outOfRange++
+			continue
+		}
+		if age < actualMin {
+			actualMin = age
+		}
+		if age > actualMax {
+			actualMax = age
+		}
+		sumAge += age
+
+		switch {
+		case age <= 25:
+			buckets["18-25"]++
+		case age <= 35:
+			buckets["26-35"]++
+		case age <= 45:
+			buckets["36-45"]++
+		case age <= 55:
+			buckets["46-55"]++
+		case age <= 65:
+			buckets["56-65"]++
+		default:
+			buckets["66+"]++
+		}
+
+		var totalShares int64
+		var totalInvested float64
+		database.DB.Model(&models.Investment{}).
+			Where("shareholder_id = ? AND status = 'active' AND approval_status = 'approved'", sh.ID).
+			Select("COALESCE(SUM(number_of_shares), 0)").Scan(&totalShares)
+		database.DB.Model(&models.Investment{}).
+			Where("shareholder_id = ? AND status = 'active' AND approval_status = 'approved'", sh.ID).
+			Select("COALESCE(SUM(amount), 0)").Scan(&totalInvested)
+
+		entries = append(entries, AgeEntry{
+			Shareholder:   sh,
+			Age:           age,
+			TotalShares:   totalShares,
+			TotalInvested: totalInvested,
+		})
+	}
+
+	avgAge := 0.0
+	if len(entries) > 0 {
+		avgAge = float64(sumAge) / float64(len(entries))
+	} else {
+		actualMin = 0
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"data":                     entries,
+		"total":                    len(entries),
+		"min_age_filter":           minAge,
+		"max_age_filter":           maxAge,
+		"actual_min_age":           actualMin,
+		"actual_max_age":           actualMax,
+		"average_age":              avgAge,
+		"age_buckets":              buckets,
+		"shareholders_without_dob": withoutDOB,
+		"shareholders_out_of_range": outOfRange,
+	})
+}

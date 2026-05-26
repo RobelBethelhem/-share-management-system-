@@ -16,9 +16,15 @@ export const shareholderTypes = [
   { value: 'Economic', label: 'Economic' },
 ];
 
+// Payment methods. `value` is what's persisted in the DB
+// (Investment.payment_method) and must stay stable -- changing it would
+// break historical rows. `label` is the user-facing name shown in
+// dropdowns and value renders. "bank_transfer" is displayed as
+// "From Account" per operator preference; the From-Account field in
+// the modal then captures the originating bank account.
 export const paymentMethods = [
   { value: 'cash', label: 'Cash' },
-  { value: 'bank_transfer', label: 'Bank Transfer' },
+  { value: 'bank_transfer', label: 'From Account' },
   { value: 'check', label: 'Check' },
   { value: 'cpo', label: 'CPO' },
   { value: 'dividend', label: 'Dividend' },

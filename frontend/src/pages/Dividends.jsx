@@ -125,20 +125,32 @@ export default function Dividends() {
     }
 
     const cohorts = [];
+    // Audit-equivalent days for a single calendar date relative to the
+    // reference. Matches backend daysHeld semantics: never exceeds dY.
+    const auditDays = (d) => Math.min(dY, Math.max(0, refDate.diff(d, 'day')));
+
     const pushConsumption = (p, sub, take) => {
       const addDate = dayjs(p.payment_date).startOf('day');
       const subDate = dayjs(sub.payment_date).startOf('day');
-      // Whole days using date-only math — matches the backend's daysHeld
-      // after the same-day fix. days = 0 when buy and transfer share a date,
-      // which we now render explicitly instead of dropping.
-      const days = Math.max(0, subDate.diff(addDate, 'day'));
+      // FY-counted days for this cohort:
+      //   audit math gives this cohort
+      //     shares × (auditDays(add) − auditDays(sub)) ÷ dY
+      //   which is the correct decomposition of the per-investment formula
+      //   the backend uses. Two events both older than dY days clamp to the
+      //   same auditDays and the cohort contributes zero (matches audit).
+      const fyDays = Math.max(0, auditDays(addDate) - auditDays(subDate));
+      // Raw ownership length is kept for the "Period" tooltip so the user
+      // can see when the FY clamp shortened the counted period vs the
+      // actual time the shareholder held those shares.
+      const rawDays = Math.max(0, subDate.diff(addDate, 'day'));
       cohorts.push({
         key: `c-${p.investment_id}-${sub.investment_id}`,
         shares: take,
         startDate: addDate,
-        endDate: days > 0 ? subDate.subtract(1, 'day') : subDate,
-        days,
-        weighted: take * days / dY,
+        endDate: rawDays > 0 ? subDate.subtract(1, 'day') : subDate,
+        days: fyDays,
+        rawDays,
+        weighted: take * fyDays / dY,
         sourceKind: p.kind,
         sourceAlloc: p.allocation_no,
         sourceInvId: p.investment_id,
@@ -147,7 +159,7 @@ export default function Dividends() {
         outcomeInvId: sub.investment_id,
         outcomeDate: subDate,
         stayed: false,
-        sameDay: days === 0,
+        sameDay: rawDays === 0,
         crossAlloc: p.allocation_id !== sub.allocation_id,
       });
     };
@@ -190,19 +202,22 @@ export default function Dividends() {
       }
     }
 
-    // Phase 3 — remaining adds → "stayed to reference" cohorts.
+    // Phase 3 — remaining adds → "stayed to reference" cohorts. FY-clamped
+    // so an add older than dY days only counts dY (matches audit).
     for (const bucket of byAlloc.values()) {
       for (const p of bucket.adds) {
         if (p._remaining > 0) {
           const addDate = dayjs(p.payment_date).startOf('day');
-          const days = Math.max(0, refDate.diff(addDate, 'day'));
+          const fyDays = auditDays(addDate);
+          const rawDays = Math.max(0, refDate.diff(addDate, 'day'));
           cohorts.push({
             key: `c-${p.investment_id}-stayed`,
             shares: p._remaining,
             startDate: addDate,
             endDate: refDate,
-            days,
-            weighted: p._remaining * days / dY,
+            days: fyDays,
+            rawDays,
+            weighted: p._remaining * fyDays / dY,
             sourceKind: p.kind,
             sourceAlloc: p.allocation_no,
             sourceInvId: p.investment_id,
@@ -211,7 +226,7 @@ export default function Dividends() {
             outcomeInvId: null,
             outcomeDate: null,
             stayed: true,
-            sameDay: days === 0,
+            sameDay: rawDays === 0,
             crossAlloc: false,
           });
         }
@@ -934,7 +949,18 @@ export default function Dividends() {
                     </Space>
                   );
                 }},
-                { title: 'Days', dataIndex: 'days' },
+                { title: 'Days (counted)', key: 'days', render: (_, p) => (
+                  <div>
+                    <Text strong>{p.days}</Text>
+                    {p.rawDays != null && p.rawDays !== p.days && (
+                      <div>
+                        <Text type="secondary" style={{ fontSize: 11 }}>
+                          {p.days === 0 ? `${p.rawDays} d held, all outside FY` : `actual ${p.rawDays} d, FY-clamped`}
+                        </Text>
+                      </div>
+                    )}
+                  </div>
+                )},
                 { title: 'Weighted Shares', dataIndex: 'weighted',
                   render: v => <Text strong style={{ color: '#3f8600' }}>{Number(v).toFixed(4)}</Text>
                 },

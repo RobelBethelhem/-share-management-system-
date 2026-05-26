@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   Table, Button, Modal, Form, Input, Select, InputNumber, Space, Tag, Divider,
   message, Typography, Row, Col, Popconfirm, Card, Statistic, Descriptions, Alert,
@@ -14,7 +14,7 @@ import { saveAs } from 'file-saver';
 import {
   getDividends, collectDividend, blockDividend, releaseDividend,
   transferDividend, reinvestDividend, getDividendBreakdown, getDividendHistory,
-  getBankCapital,
+  getBankCapital, searchShareholders,
 } from '../services/api';
 import { formatCurrency, formatNumber, paymentMethods } from '../utils/format';
 
@@ -76,6 +76,33 @@ export default function Dividends() {
   const [exportScope, setExportScope] = useState('current'); // 'current' | 'all'
   const [exportCols, setExportCols] = useState(DEFAULT_EXPORT_COLS);
   const [exportLoading, setExportLoading] = useState(false);
+  // Shareholder filter: array of { id, label } pairs. When empty -> no filter.
+  // The labelInValue option below means the Select keeps the full {id,label}
+  // tuples so the chip displays a useful label even if the user removes the
+  // search term that originally surfaced this option.
+  const [exportShareholders, setExportShareholders] = useState([]);
+  const [shSearchOptions, setShSearchOptions] = useState([]);
+  const [shSearchLoading, setShSearchLoading] = useState(false);
+  const shSearchTimeoutRef = useRef(null);
+
+  const handleShareholderSearch = (val) => {
+    if (shSearchTimeoutRef.current) clearTimeout(shSearchTimeoutRef.current);
+    if (!val || val.length < 2) {
+      setShSearchOptions([]);
+      return;
+    }
+    shSearchTimeoutRef.current = setTimeout(async () => {
+      setShSearchLoading(true);
+      try {
+        const res = await searchShareholders(val);
+        setShSearchOptions((res.data?.data || []).map(s => ({
+          value: s.id,
+          label: `${s.account_no || `#${s.id}`} — ${s.first_name || ''} ${s.middle_name || ''} ${s.last_name || ''}`.replace(/\s+/g, ' ').trim(),
+        })));
+      } catch { setShSearchOptions([]); }
+      setShSearchLoading(false);
+    }, 300);
+  };
 
   const handleExport = async () => {
     if (exportCols.length === 0) {
@@ -96,6 +123,19 @@ export default function Dividends() {
         }
         const res = await getDividends({ page: 1, page_size: pageSize, fiscal_year: fiscalYear });
         rows = res.data?.data || [];
+      }
+
+      // Shareholder filter (client-side). When non-empty, keep only rows
+      // whose shareholder_id is in the selected set.
+      if (exportShareholders.length > 0) {
+        const allowed = new Set(exportShareholders.map(s => s.value));
+        rows = rows.filter(r => allowed.has(r.shareholder_id ?? r.shareholder?.id));
+      }
+
+      if (rows.length === 0) {
+        message.warning('No rows match the selected filters. Nothing to export.');
+        setExportLoading(false);
+        return;
       }
 
       const cols = EXPORT_COLUMNS.filter(c => exportCols.includes(c.key));
@@ -563,6 +603,8 @@ export default function Dividends() {
             onClick={() => {
               setExportCols(DEFAULT_EXPORT_COLS);
               setExportScope('current');
+              setExportShareholders([]);
+              setShSearchOptions([]);
               setExportModal(true);
             }}
             style={{ color: '#217346', borderColor: '#217346' }}
@@ -713,6 +755,9 @@ export default function Dividends() {
               {exportScope === 'current'
                 ? `${data.length} row${data.length === 1 ? '' : 's'} (current page)`
                 : `${total.toLocaleString()} row${total === 1 ? '' : 's'} (all pages)`}
+              {exportShareholders.length > 0 && (
+                <> · filtered to <Text strong>{exportShareholders.length}</Text> shareholder{exportShareholders.length === 1 ? '' : 's'}</>
+              )}
             </Text>
             <Button onClick={() => setExportModal(false)}>Cancel</Button>
             <Button
@@ -755,6 +800,38 @@ export default function Dividends() {
             </Text>
           </Radio>
         </Radio.Group>
+
+        <Divider orientation="left" style={{ margin: '12px 0 8px', fontSize: 13 }}>
+          Shareholder filter
+          <Text type="secondary" style={{ fontWeight: 400, fontSize: 11, marginLeft: 8 }}>
+            (optional — leave empty to export all)
+          </Text>
+        </Divider>
+        <Select
+          mode="multiple"
+          labelInValue
+          showSearch
+          filterOption={false}
+          allowClear
+          placeholder="Type 2+ characters to search by account no or name…"
+          value={exportShareholders}
+          onSearch={handleShareholderSearch}
+          onChange={(vals) => setExportShareholders(vals || [])}
+          loading={shSearchLoading}
+          options={shSearchOptions}
+          notFoundContent={
+            shSearchLoading
+              ? 'Searching…'
+              : (shSearchOptions.length === 0 ? 'Type 2+ characters to search' : null)
+          }
+          style={{ width: '100%' }}
+          maxTagCount="responsive"
+        />
+        {exportShareholders.length > 0 && (
+          <div style={{ marginTop: 6, fontSize: 11, color: '#666' }}>
+            Only rows for these {exportShareholders.length} shareholder{exportShareholders.length === 1 ? '' : 's'} will be exported. Leave the field empty to include everyone in the chosen scope.
+          </div>
+        )}
 
         <Divider orientation="left" style={{ margin: '12px 0 8px', fontSize: 13 }}>Columns</Divider>
         <div style={{ marginBottom: 8 }}>

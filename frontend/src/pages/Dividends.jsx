@@ -2,11 +2,11 @@ import { useState, useEffect, useRef } from 'react';
 import {
   Table, Button, Modal, Form, Input, Select, InputNumber, Space, Tag, Divider,
   message, Typography, Row, Col, Popconfirm, Card, Statistic, Descriptions, Alert,
-  Tooltip, Checkbox, Radio,
+  Tooltip, Checkbox, Radio, Switch,
 } from 'antd';
 import {
   DollarOutlined, InfoCircleOutlined, RiseOutlined, HistoryOutlined,
-  CalculatorOutlined, FileExcelOutlined,
+  CalculatorOutlined, FileExcelOutlined, PrinterOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import * as XLSX from 'xlsx';
@@ -70,6 +70,150 @@ export default function Dividends() {
 
   // Expanded row cache: { [dividendId]: { breakdown, history } }
   const [expandedCache, setExpandedCache] = useState({});
+
+  // Per-dividend breakdown view mode: 'audit' (default, additive with negatives)
+  // vs 'phased' (positive-only, time-period rows that show the net shares held
+  // during each contiguous span between events). Phased view is purely a
+  // re-presentation — the total weighted shares is identical.
+  const [breakdownView, setBreakdownView] = useState({});
+  const isPhased = (id) => breakdownView[id] === 'phased';
+  const toggleBreakdownView = (id) =>
+    setBreakdownView(prev => ({ ...prev, [id]: prev[id] === 'phased' ? 'audit' : 'phased' }));
+
+  // Re-shape per-investment entries into contiguous time periods. Each row
+  // represents one continuous span of ownership at a single net share count;
+  // boundaries are the payment_dates of any event (purchase, transfer in/out,
+  // dividend reinvest). Math is identical: Σ(shares×days÷daysInYear) is
+  // invariant under this transformation.
+  const computePhasedRows = (entries, daysInYear, referenceDate) => {
+    if (!entries?.length) return [];
+    const sorted = [...entries].sort((a, b) => {
+      const da = a.payment_date ? new Date(a.payment_date).getTime() : 0;
+      const db = b.payment_date ? new Date(b.payment_date).getTime() : 0;
+      return da - db || (a.investment_id || 0) - (b.investment_id || 0);
+    });
+    const dateGroups = [];
+    for (const e of sorted) {
+      const d = e.payment_date ? dayjs(e.payment_date).format('YYYY-MM-DD') : 'unknown';
+      const last = dateGroups[dateGroups.length - 1];
+      if (last && last.date === d) {
+        last.events.push(e);
+        last.delta += Number(e.shares || 0);
+      } else {
+        dateGroups.push({ date: d, events: [e], delta: Number(e.shares || 0) });
+      }
+    }
+    const refDate = referenceDate ? dayjs(referenceDate) : dayjs();
+    const phased = [];
+    let cumulative = 0;
+    for (let i = 0; i < dateGroups.length; i++) {
+      const g = dateGroups[i];
+      cumulative += g.delta;
+      const startDate = dayjs(g.date);
+      const isLast = i === dateGroups.length - 1;
+      const nextEventDate = isLast ? refDate : dayjs(dateGroups[i + 1].date);
+      const displayEnd = isLast ? refDate : nextEventDate.subtract(1, 'day');
+      const days = nextEventDate.diff(startDate, 'day');
+      if (days <= 0) continue;
+      phased.push({
+        key: `phase-${i}`,
+        startDate, endDate: displayEnd,
+        shares: cumulative,
+        days,
+        weighted: cumulative * days / (daysInYear || 365),
+        events: g.events,
+        allocationNos: [...new Set(g.events.map(e => e.allocation_no).filter(Boolean))].join(', '),
+        kinds: [...new Set(g.events.map(e => e.kind))].join(', '),
+      });
+    }
+    return phased;
+  };
+
+  // Print the breakdown in the operator's current view. Opens a new window
+  // with the dividend header + active table formatted for paper.
+  const handlePrintBreakdown = (dividend, breakdown, useView) => {
+    if (!breakdown) { message.warning('Breakdown not loaded yet'); return; }
+    const sh = dividend.shareholder || {};
+    const refStr = breakdown.reference_date ? dayjs(breakdown.reference_date).format('YYYY-MM-DD') : '—';
+    const isPhasedView = useView === 'phased';
+    const phased = isPhasedView ? computePhasedRows(breakdown.investments || [], breakdown.days_in_year, breakdown.reference_date) : [];
+    const w = window.open('', '_blank');
+    let body = `<!DOCTYPE html><html><head><title>Dividend Breakdown — ${sh.account_no || ''}</title>
+      <style>
+        body { font-family: 'Segoe UI', Arial, sans-serif; margin: 18px; color: #333; }
+        h1 { color: #1a3a5c; margin: 0 0 4px; font-size: 20px; }
+        h2 { color: #1a3a5c; margin: 0 0 12px; font-size: 14px; font-weight: normal; }
+        .meta { display: flex; gap: 16px; margin-bottom: 12px; font-size: 12px; color: #666; flex-wrap: wrap; }
+        .meta b { color: #333; }
+        table { width: 100%; border-collapse: collapse; font-size: 11px; margin-top: 10px; }
+        th { background: #1a3a5c; color: #fff; padding: 6px 5px; text-align: left; }
+        td { padding: 5px; border-bottom: 1px solid #ddd; }
+        tr.tot { background: #f0f5ff; font-weight: 700; }
+        td.num { text-align: right; }
+        td.neg { color: #cf1322; }
+        td.pos { color: #3f8600; }
+        @media print { body { margin: 8px; } @page { size: A4 landscape; } }
+      </style></head><body>
+      <h1>ZEMEN BANK S.C. — Dividend Weighted-Share Breakdown</h1>
+      <h2>${isPhasedView ? 'Phased view (net shares per period)' : 'Audit view (per payment event)'}</h2>
+      <div class="meta">
+        <span><b>Account:</b> ${sh.account_no || '—'}</span>
+        <span><b>Name:</b> ${(sh.first_name || '') + ' ' + (sh.middle_name || '') + ' ' + (sh.last_name || '')}</span>
+        <span><b>Fiscal Year:</b> ${dividend.fiscal_year || '—'}</span>
+        <span><b>Reference Date:</b> ${refStr}</span>
+        <span><b>Days in Year:</b> ${breakdown.days_in_year || 365}</span>
+        <span><b>DPS:</b> ETB ${Number(breakdown.dividend_per_share || 0).toFixed(4)}</span>
+      </div>`;
+    if (isPhasedView) {
+      body += `<table><thead><tr>
+        <th>Period</th><th>Allocation</th><th>Kind</th>
+        <th class="num">Net Shares Held</th><th class="num">Days</th>
+        <th class="num">Weighted Shares</th><th>Formula</th>
+      </tr></thead><tbody>`;
+      let total = 0;
+      for (const p of phased) {
+        total += p.weighted;
+        body += `<tr>
+          <td>${p.startDate.format('YYYY-MM-DD')} → ${p.endDate.format('YYYY-MM-DD')}</td>
+          <td>${p.allocationNos || '—'}</td>
+          <td>${p.kinds || '—'}</td>
+          <td class="num ${p.shares < 0 ? 'neg' : 'pos'}">${formatNumber(p.shares)}</td>
+          <td class="num">${p.days}</td>
+          <td class="num ${p.weighted < 0 ? 'neg' : 'pos'}">${p.weighted.toFixed(4)}</td>
+          <td>${p.shares} × ${p.days} ÷ ${breakdown.days_in_year || 365}</td>
+        </tr>`;
+      }
+      body += `<tr class="tot"><td colspan="5">Total weighted shares</td>
+        <td class="num">${total.toFixed(4)}</td><td>× ETB ${Number(breakdown.dividend_per_share || 0).toFixed(4)} = ETB ${(total * (breakdown.dividend_per_share || 0)).toFixed(2)}</td>
+      </tr></tbody></table>`;
+    } else {
+      body += `<table><thead><tr>
+        <th>Inv #</th><th>Kind</th><th>Allocation</th><th>Reference</th>
+        <th class="num">Shares</th><th>Payment Date</th><th>Ending Date</th>
+        <th class="num">Days</th><th class="num">Weighted Shares</th><th>Formula</th>
+      </tr></thead><tbody>`;
+      let total = 0;
+      for (const r of breakdown.investments || []) {
+        total += Number(r.weighted_shares || 0);
+        body += `<tr>
+          <td>${r.investment_id}</td><td>${r.kind}</td>
+          <td>${r.allocation_no || '—'}</td><td>${r.reference_no || '—'}</td>
+          <td class="num ${Number(r.shares) < 0 ? 'neg' : 'pos'}">${formatNumber(r.shares)}</td>
+          <td>${r.payment_date ? dayjs(r.payment_date).format('YYYY-MM-DD') : '—'}</td>
+          <td>${r.ending_date ? dayjs(r.ending_date).format('YYYY-MM-DD') : '—'}</td>
+          <td class="num">${Math.round(r.days_held || 0)}</td>
+          <td class="num ${Number(r.weighted_shares) < 0 ? 'neg' : 'pos'}">${Number(r.weighted_shares || 0).toFixed(4)}</td>
+          <td>${r.formula || ''}</td>
+        </tr>`;
+      }
+      body += `<tr class="tot"><td colspan="8">Total weighted shares</td>
+        <td class="num">${total.toFixed(4)}</td><td>× ETB ${Number(breakdown.dividend_per_share || 0).toFixed(4)} = ETB ${(total * (breakdown.dividend_per_share || 0)).toFixed(2)}</td>
+      </tr></tbody></table>`;
+    }
+    body += `<script>window.onload = () => window.print();</script></body></html>`;
+    w.document.write(body);
+    w.document.close();
+  };
 
   // Reinvest distribution state — when the Subscribe modal opens we fetch
   // the shareholder's allocations and auto-fill a greedy plan: pay down the
@@ -521,7 +665,28 @@ export default function Dividends() {
       <div>
         <Card size="small" title={<><CalculatorOutlined /> Weighted-Average Breakdown (per payment)</>}
           style={{ marginBottom: 12 }}
-          extra={<Text type="secondary">Formula: {b?.formula_label}</Text>}>
+          extra={
+            <Space size={12} wrap>
+              <Space size={4}>
+                <Text type="secondary" style={{ fontSize: 12 }}>View:</Text>
+                <Switch
+                  size="small"
+                  checked={isPhased(record.id)}
+                  onChange={() => toggleBreakdownView(record.id)}
+                  checkedChildren="Phased"
+                  unCheckedChildren="Audit"
+                />
+                <Text type="secondary" style={{ fontSize: 11 }}>
+                  {isPhased(record.id) ? 'positive-only periods' : 'per-event with negatives'}
+                </Text>
+              </Space>
+              <Button size="small" icon={<PrinterOutlined />}
+                onClick={() => handlePrintBreakdown(record, b, isPhased(record.id) ? 'phased' : 'audit')}>
+                Print
+              </Button>
+              <Text type="secondary" style={{ fontSize: 12 }}>Formula: {b?.formula_label}</Text>
+            </Space>
+          }>
           <Alert
             type="info"
             showIcon
@@ -569,6 +734,64 @@ export default function Dividends() {
               <Descriptions.Item label="Net (live)"><Text strong style={{ color: '#d32f2f' }}>{formatCurrency(b.live.net)}</Text></Descriptions.Item>
             </Descriptions>
           )}
+          {isPhased(record.id) ? (
+            <Table
+              dataSource={computePhasedRows(b?.investments || [], b?.days_in_year, b?.reference_date)}
+              rowKey="key"
+              size="small"
+              pagination={false}
+              columns={[
+                { title: 'Period', key: 'period', render: (_, p) => (
+                  <div>
+                    <div><Text strong>{p.startDate.format('YYYY-MM-DD')}</Text> → <Text strong>{p.endDate.format('YYYY-MM-DD')}</Text></div>
+                    <Text type="secondary" style={{ fontSize: 11 }}>{p.days} days</Text>
+                  </div>
+                ) },
+                { title: 'Allocation(s)', dataIndex: 'allocationNos', render: v => v || '—' },
+                { title: 'Triggered by', dataIndex: 'kinds', render: (k, p) => {
+                  // Show one tag per distinct kind that produced this boundary
+                  const kinds = (k || '').split(', ').filter(Boolean);
+                  const map = {
+                    original:     { color: 'default', label: 'Purchase' },
+                    transfer_in:  { color: 'green',   label: 'Transfer In' },
+                    transfer_out: { color: 'red',     label: 'Transfer Out' },
+                    dividend:     { color: 'cyan',    label: 'Reinvest' },
+                  };
+                  return <Space size={2}>{kinds.map(kk => {
+                    const m = map[kk] || { color: 'default', label: kk };
+                    return <Tag key={kk} color={m.color}>{m.label}</Tag>;
+                  })}</Space>;
+                }},
+                { title: 'Net Shares Held', dataIndex: 'shares', render: v => {
+                  const n = Number(v);
+                  return <Text strong style={{ color: n < 0 ? '#cf1322' : n > 0 ? '#3f8600' : undefined }}>
+                    {formatNumber(v)}
+                  </Text>;
+                }},
+                { title: 'Days', dataIndex: 'days' },
+                { title: 'Weighted Shares', dataIndex: 'weighted', render: v => {
+                  const n = Number(v);
+                  return <Text strong style={{ color: n < 0 ? '#cf1322' : n > 0 ? '#3f8600' : undefined }}>
+                    {n.toFixed(4)}
+                  </Text>;
+                }},
+                { title: 'Formula', key: 'formula',
+                  render: (_, p) => <Text type="secondary" style={{ fontFamily: 'monospace', fontSize: 12 }}>
+                    {p.shares} × {p.days} ÷ {b?.days_in_year || 365}
+                  </Text> },
+              ]}
+              summary={(rows) => {
+                const total = rows.reduce((s, r) => s + Number(r.weighted || 0), 0);
+                return (
+                  <Table.Summary.Row>
+                    <Table.Summary.Cell index={0} colSpan={5}><Text strong>Total weighted shares</Text></Table.Summary.Cell>
+                    <Table.Summary.Cell index={1}><Text strong style={{ color: '#d32f2f' }}>{total.toFixed(4)}</Text></Table.Summary.Cell>
+                    <Table.Summary.Cell index={2}><Text type="secondary">× ETB {Number(b?.dividend_per_share || 0).toFixed(4)} = ETB {(total * Number(b?.dividend_per_share || 0)).toFixed(2)}</Text></Table.Summary.Cell>
+                  </Table.Summary.Row>
+                );
+              }}
+            />
+          ) : (
           <Table
             dataSource={b?.investments || []}
             rowKey="investment_id"
@@ -654,6 +877,7 @@ export default function Dividends() {
               );
             }}
           />
+          )}
         </Card>
 
         <Card size="small" title={<><HistoryOutlined /> Action History</>}>

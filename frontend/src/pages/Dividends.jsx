@@ -2,16 +2,51 @@ import { useState, useEffect } from 'react';
 import {
   Table, Button, Modal, Form, Input, Select, InputNumber, Space, Tag, Divider,
   message, Typography, Row, Col, Popconfirm, Card, Statistic, Descriptions, Alert,
-  Tooltip,
+  Tooltip, Checkbox, Radio,
 } from 'antd';
-import { DollarOutlined, InfoCircleOutlined, RiseOutlined, HistoryOutlined, CalculatorOutlined } from '@ant-design/icons';
+import {
+  DollarOutlined, InfoCircleOutlined, RiseOutlined, HistoryOutlined,
+  CalculatorOutlined, FileExcelOutlined,
+} from '@ant-design/icons';
 import dayjs from 'dayjs';
+import * as XLSX from 'xlsx';
+import { saveAs } from 'file-saver';
 import {
   getDividends, collectDividend, blockDividend, releaseDividend,
   transferDividend, reinvestDividend, getDividendBreakdown, getDividendHistory,
   getBankCapital,
 } from '../services/api';
 import { formatCurrency, formatNumber, paymentMethods } from '../utils/format';
+
+// Excel export schema. Each column is a key, user-facing label, group (for
+// UI sectioning), getter (cell value as PRIMITIVE — no JSX), and a
+// defaultSelected flag that drives the initial checkbox state.
+const EXPORT_COLUMNS = [
+  { key: 'id',                   group: 'Identity', label: 'ID',                  getter: r => r.id,                                                                                                    defaultSelected: true  },
+  { key: 'shareholder_id',       group: 'Identity', label: 'Shareholder ID',      getter: r => r.shareholder_id ?? r.shareholder?.id ?? '',                                                             defaultSelected: true  },
+  { key: 'shareholder_name',     group: 'Identity', label: 'Shareholder Name',    getter: r => r.shareholder ? `${r.shareholder.first_name || ''} ${r.shareholder.middle_name || ''} ${r.shareholder.last_name || ''}`.replace(/\s+/g, ' ').trim() : '', defaultSelected: true  },
+  { key: 'account_no',           group: 'Identity', label: 'Account No',          getter: r => r.shareholder?.account_no ?? '',                                                                         defaultSelected: true  },
+  { key: 'fiscal_year',          group: 'Identity', label: 'Fiscal Year',         getter: r => r.fiscal_year,                                                                                           defaultSelected: true  },
+  { key: 'weighted_avg_shares',  group: 'Shares & Amounts', label: 'W.Avg Shares (stored)', getter: r => r.weighted_avg_shares,                                                                          defaultSelected: true  },
+  { key: 'live_weighted_shares', group: 'Shares & Amounts', label: 'W.Avg Shares (live)',   getter: r => r.live_weighted_shares,                                                                         defaultSelected: false },
+  { key: 'gross_dividend',       group: 'Shares & Amounts', label: 'Gross (stored)',        getter: r => r.gross_dividend,                                                                               defaultSelected: true  },
+  { key: 'live_gross_dividend',  group: 'Shares & Amounts', label: 'Gross (live)',          getter: r => r.live_gross_dividend,                                                                          defaultSelected: false },
+  { key: 'reinvested_amount',    group: 'Shares & Amounts', label: 'Reinvested',            getter: r => r.reinvested_amount || 0,                                                                       defaultSelected: true  },
+  { key: 'tax_amount',           group: 'Shares & Amounts', label: 'Tax (stored)',          getter: r => r.tax_amount,                                                                                   defaultSelected: true  },
+  { key: 'live_tax_amount',      group: 'Shares & Amounts', label: 'Tax (live)',            getter: r => r.live_tax_amount,                                                                              defaultSelected: false },
+  { key: 'net_dividend',         group: 'Shares & Amounts', label: 'Net (stored)',          getter: r => r.net_dividend,                                                                                 defaultSelected: true  },
+  { key: 'live_net_dividend',    group: 'Shares & Amounts', label: 'Net (live)',            getter: r => r.live_net_dividend,                                                                            defaultSelected: false },
+  { key: 'collected_amount',     group: 'Collection State', label: 'Collected',             getter: r => r.collected_amount,                                                                             defaultSelected: true  },
+  { key: 'uncollected_amount',   group: 'Collection State', label: 'Uncollected',           getter: r => r.uncollected_amount,                                                                           defaultSelected: true  },
+  { key: 'status',               group: 'Collection State', label: 'Status',                getter: r => r.status,                                                                                       defaultSelected: true  },
+  { key: 'is_blocked',           group: 'Collection State', label: 'Blocked?',              getter: r => r.is_blocked ? 'Yes' : 'No',                                                                    defaultSelected: false },
+  { key: 'is_transferred',       group: 'Collection State', label: 'Transferred?',          getter: r => r.is_transferred ? 'Yes' : 'No',                                                                defaultSelected: false },
+  { key: 'transfer_to',          group: 'Collection State', label: 'Transferred To',        getter: r => r.transfer_to ?? '',                                                                            defaultSelected: false },
+];
+
+const DEFAULT_EXPORT_COLS = EXPORT_COLUMNS.filter(c => c.defaultSelected).map(c => c.key);
+const ALL_EXPORT_COLS = EXPORT_COLUMNS.map(c => c.key);
+const EXPORT_GROUPS = [...new Set(EXPORT_COLUMNS.map(c => c.group))];
 
 const { Title, Text } = Typography;
 
@@ -35,6 +70,72 @@ export default function Dividends() {
 
   // Expanded row cache: { [dividendId]: { breakdown, history } }
   const [expandedCache, setExpandedCache] = useState({});
+
+  // Excel export state
+  const [exportModal, setExportModal] = useState(false);
+  const [exportScope, setExportScope] = useState('current'); // 'current' | 'all'
+  const [exportCols, setExportCols] = useState(DEFAULT_EXPORT_COLS);
+  const [exportLoading, setExportLoading] = useState(false);
+
+  const handleExport = async () => {
+    if (exportCols.length === 0) {
+      message.error('Pick at least one column to export.');
+      return;
+    }
+    setExportLoading(true);
+    try {
+      // Decide row source: the current visible page, or everything matching
+      // the current fiscal-year filter. For "all", request the full count
+      // in one shot using page_size = total (capped so an unbounded result
+      // doesn't kill the browser).
+      let rows = data;
+      if (exportScope === 'all') {
+        const pageSize = Math.max(total || 0, 1);
+        if (pageSize > 10000) {
+          message.warning(`Exporting ${pageSize.toLocaleString()} rows — this may take a moment.`);
+        }
+        const res = await getDividends({ page: 1, page_size: pageSize, fiscal_year: fiscalYear });
+        rows = res.data?.data || [];
+      }
+
+      const cols = EXPORT_COLUMNS.filter(c => exportCols.includes(c.key));
+      const headers = cols.map(c => c.label);
+      const dataRows = rows.map(r => cols.map(c => {
+        const v = c.getter(r);
+        // Coerce undefined/null to empty so Excel cells aren't literal "undefined"
+        return v == null ? '' : v;
+      }));
+
+      const wb = XLSX.utils.book_new();
+      const ws = XLSX.utils.aoa_to_sheet([headers, ...dataRows]);
+
+      // Auto-width columns based on the longest cell content per column.
+      const colWidths = headers.map((h, i) => {
+        let max = String(h).length;
+        for (const row of dataRows) {
+          const len = String(row[i] ?? '').length;
+          if (len > max) max = len;
+        }
+        return { wch: Math.min(Math.max(max + 2, 8), 40) };
+      });
+      ws['!cols'] = colWidths;
+
+      XLSX.utils.book_append_sheet(wb, ws, 'Dividends');
+      const buf = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+      const scopeTag = exportScope === 'all' ? 'all' : `p${page}`;
+      const yearTag = fiscalYear || 'all-years';
+      saveAs(
+        new Blob([buf], { type: 'application/octet-stream' }),
+        `dividends-${yearTag}-${scopeTag}-${dayjs().format('YYYY-MM-DD-HHmm')}.xlsx`,
+      );
+      message.success(`Exported ${rows.length.toLocaleString()} row${rows.length === 1 ? '' : 's'}`);
+      setExportModal(false);
+    } catch (e) {
+      message.error(e.response?.data?.error || 'Export failed');
+    } finally {
+      setExportLoading(false);
+    }
+  };
 
   const fetchData = async () => {
     setLoading(true);
@@ -456,8 +557,21 @@ export default function Dividends() {
     <div>
       <Row justify="space-between" align="middle" style={{ marginBottom: 16 }}>
         <Title level={4} style={{ margin: 0 }}>Dividend Payments</Title>
-        <Input placeholder="Filter by fiscal year" style={{ width: 200 }}
-          onChange={(e) => setFiscalYear(e.target.value)} allowClear />
+        <Space>
+          <Button
+            icon={<FileExcelOutlined />}
+            onClick={() => {
+              setExportCols(DEFAULT_EXPORT_COLS);
+              setExportScope('current');
+              setExportModal(true);
+            }}
+            style={{ color: '#217346', borderColor: '#217346' }}
+          >
+            Export Excel
+          </Button>
+          <Input placeholder="Filter by fiscal year" style={{ width: 200 }}
+            onChange={(e) => setFiscalYear(e.target.value)} allowClear />
+        </Space>
       </Row>
 
       <Table dataSource={data} columns={columns} rowKey="id" loading={loading} size="small"
@@ -584,6 +698,119 @@ export default function Dividends() {
             </Space>
           </Form.Item>
         </Form>
+      </Modal>
+
+      {/* Excel Export Modal — column picker + scope (current page vs all pages) */}
+      <Modal
+        open={exportModal}
+        onCancel={() => setExportModal(false)}
+        title={<Space><FileExcelOutlined style={{ color: '#217346' }} /> Export Dividends to Excel</Space>}
+        width={680}
+        footer={
+          <Space>
+            <Text type="secondary" style={{ fontSize: 12, marginRight: 'auto' }}>
+              {exportCols.length} of {EXPORT_COLUMNS.length} columns ·{' '}
+              {exportScope === 'current'
+                ? `${data.length} row${data.length === 1 ? '' : 's'} (current page)`
+                : `${total.toLocaleString()} row${total === 1 ? '' : 's'} (all pages)`}
+            </Text>
+            <Button onClick={() => setExportModal(false)}>Cancel</Button>
+            <Button
+              type="primary"
+              icon={<FileExcelOutlined />}
+              loading={exportLoading}
+              disabled={exportCols.length === 0}
+              onClick={handleExport}
+              style={{ background: '#217346', borderColor: '#217346' }}
+            >
+              Export {exportScope === 'current' ? 'This Page' : 'All Pages'}
+            </Button>
+          </Space>
+        }
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="Pick the columns and how much data to include"
+          description={
+            fiscalYear
+              ? `Current filter: fiscal year "${fiscalYear}". Exports will only include rows matching this filter.`
+              : 'No fiscal-year filter active — exports include every fiscal year.'
+          }
+        />
+
+        <Divider orientation="left" style={{ margin: '8px 0', fontSize: 13 }}>Scope</Divider>
+        <Radio.Group value={exportScope} onChange={(e) => setExportScope(e.target.value)} style={{ marginBottom: 8 }}>
+          <Radio value="current">
+            Current page only
+            <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
+              ({data.length} row{data.length === 1 ? '' : 's'} shown now)
+            </Text>
+          </Radio>
+          <Radio value="all" style={{ marginLeft: 16 }}>
+            All pages
+            <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
+              ({total.toLocaleString()} row{total === 1 ? '' : 's'} total)
+            </Text>
+          </Radio>
+        </Radio.Group>
+
+        <Divider orientation="left" style={{ margin: '12px 0 8px', fontSize: 13 }}>Columns</Divider>
+        <div style={{ marginBottom: 8 }}>
+          <Space size={4}>
+            <Button size="small" type="link" onClick={() => setExportCols(ALL_EXPORT_COLS)}>Select all</Button>
+            <Button size="small" type="link" onClick={() => setExportCols(DEFAULT_EXPORT_COLS)}>Defaults</Button>
+            <Button size="small" type="link" danger onClick={() => setExportCols([])}>Clear</Button>
+          </Space>
+        </div>
+
+        <div style={{
+          border: '1px solid #d9d9d9',
+          borderRadius: 6,
+          padding: 12,
+          maxHeight: 320,
+          overflowY: 'auto',
+          background: '#fafafa',
+        }}>
+          <Checkbox.Group
+            value={exportCols}
+            onChange={setExportCols}
+            style={{ width: '100%' }}
+          >
+            {EXPORT_GROUPS.map(group => {
+              const groupCols = EXPORT_COLUMNS.filter(c => c.group === group);
+              const groupKeys = groupCols.map(c => c.key);
+              const allSelected = groupKeys.every(k => exportCols.includes(k));
+              const someSelected = groupKeys.some(k => exportCols.includes(k));
+              const toggleGroup = (e) => {
+                e.preventDefault();
+                if (allSelected) {
+                  setExportCols(exportCols.filter(k => !groupKeys.includes(k)));
+                } else {
+                  setExportCols([...new Set([...exportCols, ...groupKeys])]);
+                }
+              };
+              return (
+                <div key={group} style={{ marginBottom: 10 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                    <Text strong style={{ fontSize: 12, color: '#444' }}>{group}</Text>
+                    <Button size="small" type="link" onClick={toggleGroup} style={{ fontSize: 11 }}>
+                      {allSelected ? 'Clear group' : someSelected ? 'Select rest' : 'Select group'}
+                    </Button>
+                  </div>
+                  <Row gutter={[8, 4]}>
+                    {groupCols.map(c => (
+                      <Col span={12} key={c.key}>
+                        <Checkbox value={c.key} style={{ fontSize: 12 }}>{c.label}</Checkbox>
+                      </Col>
+                    ))}
+                  </Row>
+                </div>
+              );
+            })}
+          </Checkbox.Group>
+        </div>
       </Modal>
     </div>
   );

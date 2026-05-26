@@ -14,7 +14,7 @@ import { saveAs } from 'file-saver';
 import {
   getDividends, collectDividend, blockDividend, releaseDividend,
   transferDividend, reinvestDividend, getDividendBreakdown, getDividendHistory,
-  getBankCapital, searchShareholders,
+  getBankCapital, searchShareholders, getShareholderInvestmentSummary,
 } from '../services/api';
 import { formatCurrency, formatNumber, paymentMethods } from '../utils/format';
 
@@ -70,6 +70,14 @@ export default function Dividends() {
 
   // Expanded row cache: { [dividendId]: { breakdown, history } }
   const [expandedCache, setExpandedCache] = useState({});
+
+  // Reinvest distribution state — when the Subscribe modal opens we fetch
+  // the shareholder's allocations and auto-fill a greedy plan: pay down the
+  // oldest unpaid allocation first, spill the rest into the next. The user
+  // can adjust per-row before submitting.
+  const [subAllocations, setSubAllocations] = useState([]);
+  const [subDist, setSubDist] = useState({}); // { [allocation_id]: shares }
+  const [subAllocLoading, setSubAllocLoading] = useState(false);
 
   // Excel export state
   const [exportModal, setExportModal] = useState(false);
@@ -247,20 +255,101 @@ export default function Dividends() {
     }
   };
 
+  // Opens the Subscribe / Reinvest modal AND eagerly fetches the
+  // shareholder's allocations so we can render the per-allocation
+  // distribution table. The "greedy plan" auto-fills the dialog: pay down
+  // the oldest unpaid allocation first, spill any remainder into the next.
+  const openSubscribeModal = async (dividend, reinvestable) => {
+    setSubscribeModal(dividend);
+    subscribeForm.resetFields();
+    subscribeForm.setFieldsValue({
+      reinvest_amount: Math.max(0, reinvestable),
+      additional_amount: 0,
+      additional_payment_method: 'cash',
+    });
+    setSubAllocations([]);
+    setSubDist({});
+    setSubAllocLoading(true);
+    try {
+      const res = await getShareholderInvestmentSummary(
+        dividend.shareholder_id ?? dividend.shareholder?.id,
+      );
+      const allocs = (res.data?.allocations || []).filter(
+        a => a.payment_status !== 'fully_paid' && a.approval_status === 'approved'
+      );
+      // Oldest first for FIFO-style fill (mirrors how computeAllocPaidShares
+      // walks the pool on the backend).
+      allocs.sort((a, b) => (a.id || 0) - (b.id || 0));
+      setSubAllocations(allocs);
+      autoDistribute(allocs, reinvestable, parValue, 0);
+    } catch (e) {
+      message.error('Failed to load allocations: ' + (e.response?.data?.error || e.message));
+    } finally {
+      setSubAllocLoading(false);
+    }
+  };
+
+  // Greedy fill: max amount = reinvest + additional. Spread the resulting
+  // share count across allocations starting with the oldest, capped by each
+  // allocation's unpaid_after_pending capacity.
+  const autoDistribute = (allocs, reinvestAmt, par, additionalAmt) => {
+    if (!par || par <= 0) return;
+    const total = (reinvestAmt || 0) + (additionalAmt || 0);
+    let sharesLeft = Math.floor(total / par);
+    const next = {};
+    for (const a of allocs) {
+      const unpaid = Math.max(
+        0,
+        (a.allocated_shares || 0) - (a.paid_shares || 0) - (a.pending_shares || 0),
+      );
+      const take = Math.min(sharesLeft, unpaid);
+      if (take > 0) {
+        next[a.id] = take;
+        sharesLeft -= take;
+      }
+      if (sharesLeft <= 0) break;
+    }
+    setSubDist(next);
+  };
+
   const handleSubscribe = async (values) => {
     try {
+      const distributions = Object.entries(subDist)
+        .map(([allocId, shares]) => ({ allocation_id: Number(allocId), shares: Number(shares || 0) }))
+        .filter(d => d.shares > 0);
+
+      if (distributions.length === 0) {
+        message.error('Distribute at least 1 share to one of your allocations before submitting.');
+        return;
+      }
+      const totalShares = distributions.reduce((s, d) => s + d.shares, 0);
+      const totalAmount = totalShares * (parValue || 0);
+      const reinvest = Number(values.reinvest_amount ?? 0);
+      const additional = Number(values.additional_amount ?? 0);
+
+      // Enforce funding == distribution amount with a 0.5 ETB slack
+      if (Math.abs(reinvest + additional - totalAmount) > 0.5) {
+        message.error(
+          `Funding (${(reinvest + additional).toLocaleString()}) doesn't match distribution (${totalAmount.toLocaleString()}). Hit "Auto-fill from amount" to sync.`,
+        );
+        return;
+      }
+
       const payload = {
-        reinvest_amount: Number(values.reinvest_amount ?? 0),
-        additional_amount: Number(values.additional_amount ?? 0),
+        reinvest_amount: reinvest,
+        additional_amount: additional,
         additional_payment_method: values.additional_payment_method || 'cash',
         from_account: values.from_account || '',
         reference_no: values.reference_no || '',
         remark: values.remark || '',
+        distributions,
       };
       await reinvestDividend(subscribeModal.id, payload);
-      message.success('Reinvestment recorded — investments created (pending approval).');
+      message.success('Reinvestment recorded — investments created (pending approval). No new allocation made.');
       refreshExpanded(subscribeModal.id);
       setSubscribeModal(null);
+      setSubAllocations([]);
+      setSubDist({});
       subscribeForm.resetFields();
       fetchData();
     } catch (err) {
@@ -315,40 +404,47 @@ export default function Dividends() {
       title: 'Actions', key: 'actions', width: 280,
       render: (_, r) => {
         const reinvestable = (r.gross_dividend - (r.reinvested_amount || 0) - (r.collected_amount || 0));
+        const fullyConsumed = (
+          r.status === 'collected' ||
+          r.status === 'settled' ||
+          r.is_transferred ||
+          (reinvestable <= 0.005 && (r.uncollected_amount || 0) <= 0.005)
+        );
+
+        // Strict rule: when blocked → only Release. No Subscribe / Collect /
+        // Transfer is allowed until the block is cleared.
+        if (r.is_blocked) {
+          return (
+            <Space wrap>
+              <Button size="small" onClick={() => handleRelease(r.id)}>Release</Button>
+            </Space>
+          );
+        }
+
+        // Strict rule: when fully consumed (collected / transferred / settled)
+        // → no action buttons at all. The dividend is closed.
+        if (fullyConsumed) {
+          return <Text type="secondary" style={{ fontSize: 11 }}>—</Text>;
+        }
+
         return (
           <Space wrap>
-            {reinvestable > 0 && !r.is_blocked && !r.is_transferred && (
+            {reinvestable > 0 && (
               <Button size="small" type="primary" icon={<RiseOutlined />}
-                onClick={() => {
-                  setSubscribeModal(r);
-                  subscribeForm.resetFields();
-                  subscribeForm.setFieldsValue({
-                    reinvest_amount: Math.max(0, reinvestable),
-                    additional_amount: 0,
-                    additional_payment_method: 'cash',
-                  });
-                }}>
+                onClick={() => openSubscribeModal(r, reinvestable)}>
                 Subscribe
               </Button>
             )}
-            {r.uncollected_amount > 0 && !r.is_blocked && !r.is_transferred && (
+            {r.uncollected_amount > 0 && (
               <Button size="small" onClick={() => {
                 setCollectModal(r);
                 form.setFieldsValue({ amount: r.uncollected_amount, payment_method: 'cash' });
               }}>Collect</Button>
             )}
-            {r.status !== 'collected' && r.status !== 'transferred' && (
-              !r.is_blocked ? (
-                <Popconfirm title="Block dividend?" onConfirm={() => handleBlock(r.id)}>
-                  <Button size="small" danger>Block</Button>
-                </Popconfirm>
-              ) : (
-                <Button size="small" onClick={() => handleRelease(r.id)}>Release</Button>
-              )
-            )}
-            {r.status !== 'collected' && !r.is_transferred && (
-              <Button size="small" onClick={() => { setTransferModal(r); transferForm.resetFields(); }}>Transfer</Button>
-            )}
+            <Popconfirm title="Block dividend?" onConfirm={() => handleBlock(r.id)}>
+              <Button size="small" danger>Block</Button>
+            </Popconfirm>
+            <Button size="small" onClick={() => { setTransferModal(r); transferForm.resetFields(); }}>Transfer</Button>
           </Space>
         );
       },
@@ -652,6 +748,92 @@ export default function Dividends() {
               >
                 <InputNumber style={{ width: '100%' }} min={0} max={subscribeModal.gross_dividend - (subscribeModal.reinvested_amount || 0) - (subscribeModal.collected_amount || 0)} />
               </Form.Item>
+
+              {/* Apply-to-allocations distribution — pays down EXISTING unpaid
+                  shares instead of creating a new allocation. Auto-filled
+                  greedily on modal open; the operator can adjust per row. */}
+              <Divider orientation="left" style={{ margin: '8px 0', fontSize: 13 }}>
+                Apply to existing allocations (no new allocation will be created)
+              </Divider>
+              {subAllocLoading ? (
+                <Text type="secondary">Loading allocations…</Text>
+              ) : subAllocations.length === 0 ? (
+                <Alert
+                  type="warning"
+                  showIcon
+                  message="No unpaid allocations to apply this reinvestment to"
+                  description="This shareholder has no approved allocations with remaining unpaid shares. Create or approve an allocation first."
+                />
+              ) : (
+                <>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                    <Text type="secondary" style={{ fontSize: 11 }}>
+                      Auto-filled greedily from the oldest allocation. Edit any cell to override. Sum must equal the total funding amount (reinvest + additional).
+                    </Text>
+                    <Button size="small" type="link" onClick={() => autoDistribute(
+                      subAllocations,
+                      Number(subscribeForm.getFieldValue('reinvest_amount') || 0),
+                      parValue,
+                      Number(subscribeForm.getFieldValue('additional_amount') || 0),
+                    )}>
+                      Auto-fill from amount
+                    </Button>
+                  </div>
+                  <Table
+                    size="small"
+                    rowKey="id"
+                    pagination={false}
+                    dataSource={subAllocations}
+                    columns={[
+                      { title: 'Allocation', dataIndex: 'allocation_no', width: 130 },
+                      { title: 'Rnd', dataIndex: 'round', width: 50 },
+                      { title: 'Allocated', dataIndex: 'allocated_shares', width: 90,
+                        render: v => formatNumber(v) },
+                      { title: 'Paid', dataIndex: 'paid_shares', width: 80,
+                        render: v => <Text style={{ color: '#3f8600' }}>{formatNumber(v || 0)}</Text> },
+                      { title: 'Pending', dataIndex: 'pending_shares', width: 80,
+                        render: v => v ? <Text style={{ color: '#fa8c16' }}>{formatNumber(v)}</Text> : '—' },
+                      { title: 'Unpaid', key: 'unpaid', width: 80,
+                        render: (_, r) => {
+                          const u = Math.max(0, (r.allocated_shares || 0) - (r.paid_shares || 0) - (r.pending_shares || 0));
+                          return <Text style={{ color: '#cf1322' }}>{formatNumber(u)}</Text>;
+                        }},
+                      { title: 'Apply', key: 'apply', width: 110,
+                        render: (_, r) => {
+                          const cap = Math.max(0, (r.allocated_shares || 0) - (r.paid_shares || 0) - (r.pending_shares || 0));
+                          return (
+                            <InputNumber
+                              size="small"
+                              min={0}
+                              max={cap}
+                              precision={0}
+                              value={subDist[r.id] || 0}
+                              onChange={(v) => setSubDist(prev => ({ ...prev, [r.id]: Math.min(Number(v) || 0, cap) }))}
+                              style={{ width: '100%' }}
+                            />
+                          );
+                        }},
+                    ]}
+                    summary={() => {
+                      const totalShares = Object.values(subDist).reduce((s, v) => s + (Number(v) || 0), 0);
+                      const totalAmount = totalShares * (parValue || 0);
+                      return (
+                        <Table.Summary.Row style={{ background: '#fafafa' }}>
+                          <Table.Summary.Cell index={0} colSpan={5}>
+                            <Text strong>Total to apply</Text>
+                          </Table.Summary.Cell>
+                          <Table.Summary.Cell index={5}>
+                            <Text strong>{formatNumber(totalShares)} shares</Text>
+                          </Table.Summary.Cell>
+                          <Table.Summary.Cell index={6}>
+                            <Text strong style={{ color: '#1677ff' }}>{formatCurrency(totalAmount)}</Text>
+                          </Table.Summary.Cell>
+                        </Table.Summary.Row>
+                      );
+                    }}
+                  />
+                </>
+              )}
 
               <Divider style={{ margin: '8px 0' }}>Optional: add fresh money</Divider>
 

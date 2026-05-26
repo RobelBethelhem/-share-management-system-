@@ -565,7 +565,25 @@ func TransferDividend(c *gin.Context) {
 	}
 
 	var dividend models.Dividend
-	database.DB.First(&dividend, id)
+	if err := database.DB.First(&dividend, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Dividend not found"})
+		return
+	}
+	// Strict guard: a blocked dividend cannot be transferred. Release the
+	// block first. Same for already-transferred or fully-collected — there's
+	// nothing left in the ledger to hand over.
+	if dividend.IsBlocked {
+		c.JSON(http.StatusConflict, gin.H{"error": "Dividend is blocked. Release the block before transferring."})
+		return
+	}
+	if dividend.IsTransferred {
+		c.JSON(http.StatusConflict, gin.H{"error": "Dividend has already been transferred."})
+		return
+	}
+	if dividend.Status == "collected" {
+		c.JSON(http.StatusConflict, gin.H{"error": "Dividend has already been fully collected; nothing left to transfer."})
+		return
+	}
 	database.DB.Model(&models.Dividend{}).Where("id = ?", id).
 		Updates(map[string]interface{}{
 			"is_transferred":   true,

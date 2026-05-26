@@ -95,6 +95,26 @@ func computeLiveDividend(dividend models.Dividend, setting models.DividendSettin
 	}
 }
 
+// reinvestInput is the named request body type. Extracted from the inline
+// struct previously inside ReinvestDividend so the distribution helper can
+// share the same shape.
+type reinvestInput struct {
+	ReinvestAmount          float64 `json:"reinvest_amount"`
+	AdditionalAmount        float64 `json:"additional_amount"`
+	AdditionalPaymentMethod string  `json:"additional_payment_method"`
+	SubscriptionID          *uint   `json:"subscription_id"`
+	AllocationID            *uint   `json:"allocation_id"`
+	Distributions           []reinvestDistribution `json:"distributions"`
+	FromAccount             string  `json:"from_account"`
+	ReferenceNo             string  `json:"reference_no"`
+	Remark                  string  `json:"remark"`
+}
+
+type reinvestDistribution struct {
+	AllocationID uint  `json:"allocation_id"`
+	Shares       int64 `json:"shares"`
+}
+
 // ReinvestDividend is the unified "Subscribe from Dividend" action.
 //
 // The user can:
@@ -125,22 +145,22 @@ func ReinvestDividend(c *gin.Context) {
 		return
 	}
 
-	var input struct {
-		ReinvestAmount          float64 `json:"reinvest_amount"`           // gross portion to reinvest (no tax)
-		AdditionalAmount        float64 `json:"additional_amount"`          // optional, from shareholder's own pocket
-		AdditionalPaymentMethod string  `json:"additional_payment_method"` // cash, bank_transfer, cpo, check
-		SubscriptionID          *uint   `json:"subscription_id"`            // optional — link investment(s) to a subscription
-		AllocationID            *uint   `json:"allocation_id"`              // optional — link to a specific allocation
-		FromAccount             string  `json:"from_account"`               // for additional payment
-		ReferenceNo             string  `json:"reference_no"`
-		Remark                  string  `json:"remark"`
-	}
+	var input reinvestInput
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if input.ReinvestAmount <= 0 && input.AdditionalAmount <= 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Provide reinvest_amount and/or additional_amount"})
+	if input.ReinvestAmount <= 0 && input.AdditionalAmount <= 0 && len(input.Distributions) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Provide reinvest_amount, additional_amount, or distributions"})
+		return
+	}
+
+	// === NEW: distribution flow (preferred) — applies the payment to
+	// existing unpaid shares across one or more allocations. No new
+	// allocation row is created, because each Investment is linked to
+	// an existing allocation_id. ============================================
+	if len(input.Distributions) > 0 {
+		reinvestWithDistribution(c, &dividend, &input)
 		return
 	}
 
@@ -365,6 +385,224 @@ func ReinvestDividend(c *gin.Context) {
 		"new_net_dividend":         dividend.NetDividend,
 		"new_uncollected":          dividend.UncollectedAmount,
 		"new_reinvested":           dividend.ReinvestedAmount,
+	})
+}
+
+// reinvestWithDistribution applies the dividend reinvest+additional to EXISTING
+// allocations' unpaid shares. One Investment row per allocation, each linked to
+// its target allocation_id. CreateAllocationForDividendInvestment correctly
+// no-ops when allocation_id is set, so no new allocation is created and the
+// company's total share count is untouched.
+//
+// Validation:
+//   - Every allocation in distributions belongs to the dividend's shareholder
+//   - shares ≤ (allocated - FIFO-effective-approved-paid - pending-direct) for each
+//   - Sum(shares × par) ≤ ReinvestAmount + AdditionalAmount (with a 0.5-ETB slack)
+//   - ReinvestAmount ≤ (gross − already-reinvested − already-collected)
+func reinvestWithDistribution(c *gin.Context, dividend *models.Dividend, input *reinvestInput) {
+	var bc models.BankCapital
+	if err := database.DB.First(&bc).Error; err != nil || bc.ParValuePerShare <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Par value per share is not configured in bank capital settings"})
+		return
+	}
+	parValue := bc.ParValuePerShare
+
+	// Aggregate intended shares, validate per-allocation cap.
+	var totalShares int64
+	type planRow struct {
+		allocID uint
+		shares  int64
+		amount  float64
+	}
+	plan := make([]planRow, 0, len(input.Distributions))
+	for _, d := range input.Distributions {
+		if d.Shares <= 0 {
+			continue // skip empty rows from the form
+		}
+		var alloc models.Allocation
+		if err := database.DB.First(&alloc, d.AllocationID).Error; err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Allocation %d not found", d.AllocationID)})
+			return
+		}
+		if alloc.ShareholderID != dividend.ShareholderID {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Allocation %d does not belong to this shareholder", d.AllocationID)})
+			return
+		}
+		effPaid := computeAllocPaidShares(dividend.ShareholderID, alloc.ID)
+		var pendingDirect int64
+		database.DB.Model(&models.Investment{}).
+			Where("allocation_id = ? AND status = 'active' AND approval_status = 'pending' AND payment_method NOT IN ('transfer_in','transfer_out')", alloc.ID).
+			Select("COALESCE(SUM(number_of_shares), 0)").Scan(&pendingDirect)
+		unpaid := alloc.AllocatedShares - effPaid - pendingDirect
+		if unpaid < 0 {
+			unpaid = 0
+		}
+		if d.Shares > unpaid {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": fmt.Sprintf(
+					"Allocation %s: trying to apply %d shares, but only %d unpaid remaining (allocated %d, paid+pending %d).",
+					alloc.AllocationNo, d.Shares, unpaid, alloc.AllocatedShares, effPaid+pendingDirect,
+				),
+				"allocation_no":  alloc.AllocationNo,
+				"unpaid":         unpaid,
+				"attempted":      d.Shares,
+			})
+			return
+		}
+		totalShares += d.Shares
+		plan = append(plan, planRow{allocID: alloc.ID, shares: d.Shares, amount: float64(d.Shares) * parValue})
+	}
+	if totalShares == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No shares to apply — every distribution row was empty."})
+		return
+	}
+
+	totalAmount := float64(totalShares) * parValue
+
+	// Validate funding: reinvest from dividend + optional additional must
+	// equal the total (with a tiny float slack).
+	suppliedFunds := input.ReinvestAmount + input.AdditionalAmount
+	if math.Abs(suppliedFunds-totalAmount) > 0.5 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": fmt.Sprintf(
+				"Funding mismatch: distributing %d shares = %.2f ETB, but reinvest %.2f + additional %.2f = %.2f. Adjust the amounts so they add up.",
+				totalShares, totalAmount, input.ReinvestAmount, input.AdditionalAmount, suppliedFunds,
+			),
+		})
+		return
+	}
+
+	// Validate reinvest portion stays within the dividend's available budget.
+	availableInDividend := dividend.GrossDividend - dividend.ReinvestedAmount - dividend.CollectedAmount
+	actualReinvest := input.ReinvestAmount
+	if actualReinvest > availableInDividend+0.5 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": fmt.Sprintf("Reinvest %.2f exceeds available %.2f in this dividend (gross %.2f − reinvested %.2f − collected %.2f).",
+				actualReinvest, availableInDividend, dividend.GrossDividend, dividend.ReinvestedAmount, dividend.CollectedAmount),
+		})
+		return
+	}
+	if actualReinvest < 0 {
+		actualReinvest = 0
+	}
+	actualAdditional := totalAmount - actualReinvest
+
+	// Recompute dividend tax after the new reinvest amount.
+	var taxSchedules []models.DividendTaxSchedule
+	database.DB.Order("min_amount ASC").Find(&taxSchedules)
+	newReinvested := dividend.ReinvestedAmount + actualReinvest
+	newTaxable := dividend.GrossDividend - newReinvested
+	if newTaxable < 0 {
+		newTaxable = 0
+	}
+	newTax := calculateDividendTax(newTaxable, taxSchedules)
+	newNet := newTaxable - newTax
+	newUncollected := newNet - dividend.CollectedAmount
+	if newUncollected < 0 {
+		newUncollected = 0
+	}
+
+	method := input.AdditionalPaymentMethod
+	if method == "" {
+		method = "cash"
+	}
+	if actualReinvest >= actualAdditional {
+		method = "dividend"
+	}
+
+	now := time.Now()
+	userID := getUserID(c)
+	createdInvestmentIDs := []uint{}
+
+	err := database.DB.Transaction(func(tx *gorm.DB) error {
+		// Apply ledger update first.
+		oldTax := dividend.TaxAmount
+		dividend.ReinvestedAmount = math.Round(newReinvested*100) / 100
+		dividend.TaxAmount = math.Round(newTax*100) / 100
+		dividend.NetDividend = math.Round(newNet*100) / 100
+		dividend.UncollectedAmount = math.Round(newUncollected*100) / 100
+		if dividend.UncollectedAmount <= 0 && dividend.ReinvestedAmount+dividend.CollectedAmount >= dividend.GrossDividend-0.005 {
+			dividend.Status = "settled"
+		}
+		if err := tx.Save(dividend).Error; err != nil {
+			return err
+		}
+
+		// One Investment row per distribution, each linked to its allocation.
+		// payment_method is "dividend" if dividend is dominant, else the
+		// additional method. Each row's amount = shares × par.
+		for _, p := range plan {
+			allocID := p.allocID
+			inv := models.Investment{
+				ShareholderID:  dividend.ShareholderID,
+				PaymentDate:    &now,
+				PaymentMethod:  method,
+				Amount:         p.amount,
+				NumberOfShares: p.shares,
+				ParValue:       parValue,
+				ReferenceNo:    input.ReferenceNo,
+				FromAccount:    input.FromAccount,
+				AllocationID:   &allocID, // <- linked → no new allocation
+				Status:         "active",
+				ApprovalStatus: "pending",
+				Remark: fmt.Sprintf("Dividend #%d reinvest → allocation #%d: %d shares (ETB %.2f)",
+					dividend.ID, allocID, p.shares, p.amount),
+			}
+			if err := tx.Create(&inv).Error; err != nil {
+				return err
+			}
+			tx.Create(&models.PendingApproval{
+				EntityType:  "investment",
+				EntityID:    inv.ID,
+				Action:      "create",
+				RequestedBy: userID,
+				Status:      "pending",
+				RequestedAt: now,
+			})
+			createdInvestmentIDs = append(createdInvestmentIDs, inv.ID)
+		}
+
+		// Log a single rolled-up dividend action so reject can reverse cleanly.
+		// The reverser walks DividendAction by investment_id; with multiple
+		// investments we log one row per investment so each reject reverses
+		// its proportional share.
+		for i, p := range plan {
+			invID := createdInvestmentIDs[i]
+			// Distribute actualReinvest proportionally across investments so a
+			// reject correctly subtracts only that investment's share.
+			amtForLog := p.amount * (actualReinvest / totalAmount)
+			logDividendAction(tx, models.DividendAction{
+				DividendID:    dividend.ID,
+				ActionType:    "reinvest",
+				Amount:        amtForLog,
+				TaxImpact:     dividend.TaxAmount - oldTax,
+				Description:   fmt.Sprintf("Reinvest to allocation #%d — %d shares (ETB %.2f)", p.allocID, p.shares, p.amount),
+				InvestmentID:  &invID,
+				PaymentMethod: method,
+				Remark:        input.Remark,
+				ActedByUserID: userID,
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":            "Reinvestment recorded (no new allocation created — applied to existing unpaid shares)",
+		"dividend":           dividend,
+		"investments":        createdInvestmentIDs,
+		"applied_shares":     totalShares,
+		"applied_amount":     totalAmount,
+		"from_dividend":      actualReinvest,
+		"from_additional":    actualAdditional,
+		"new_tax_amount":     dividend.TaxAmount,
+		"new_net_dividend":   dividend.NetDividend,
+		"new_uncollected":    dividend.UncollectedAmount,
+		"new_reinvested":     dividend.ReinvestedAmount,
+		"allocations_count":  len(plan),
 	})
 }
 

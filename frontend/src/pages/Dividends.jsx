@@ -80,53 +80,122 @@ export default function Dividends() {
   const toggleBreakdownView = (id) =>
     setBreakdownView(prev => ({ ...prev, [id]: prev[id] === 'phased' ? 'audit' : 'phased' }));
 
-  // Re-shape per-investment entries into contiguous time periods. Each row
-  // represents one continuous span of ownership at a single net share count;
-  // boundaries are the payment_dates of any event (purchase, transfer in/out,
-  // dividend reinvest). Math is identical: Σ(shares×days÷daysInYear) is
-  // invariant under this transformation.
+  // Re-shape per-investment entries into share COHORTS. Each row tracks a
+  // contiguous slice of shares from when they were acquired (purchase /
+  // transfer_in / reinvest) to when they left (transfer_out date − 1) or to
+  // the reference date if they stayed.
+  //
+  // Algorithm (per-allocation FIFO):
+  //   1. For each allocation, sort additions and subtractions by date.
+  //   2. Walk subtractions in order; each one consumes FIFO from the
+  //      allocation's earliest-still-available addition.
+  //   3. Each consumption produces a cohort row: (taken_shares,
+  //      add.payment_date → sub.payment_date − 1, days = sub - add).
+  //   4. Any addition shares still unconsumed after all subtractions become
+  //      a "stayed until reference" cohort row.
+  //
+  // The total Σ(shares × days ÷ daysInYear) is identical to the audit view —
+  // this is purely a re-presentation.
+  //
+  // Example: bought 1000 on Sep 10, transferred 500 on Jan 5, transferred
+  // 400 on Mar 15, ref June 30 →
+  //   500 shares  Sep 10 → Jan 4  (117 days, left in T1)
+  //   400 shares  Sep 10 → Mar 14 (186 days, left in T2)
+  //   100 shares  Sep 10 → Jun 30 (293 days, stayed)
   const computePhasedRows = (entries, daysInYear, referenceDate) => {
     if (!entries?.length) return [];
-    const sorted = [...entries].sort((a, b) => {
-      const da = a.payment_date ? new Date(a.payment_date).getTime() : 0;
-      const db = b.payment_date ? new Date(b.payment_date).getTime() : 0;
-      return da - db || (a.investment_id || 0) - (b.investment_id || 0);
-    });
-    const dateGroups = [];
-    for (const e of sorted) {
-      const d = e.payment_date ? dayjs(e.payment_date).format('YYYY-MM-DD') : 'unknown';
-      const last = dateGroups[dateGroups.length - 1];
-      if (last && last.date === d) {
-        last.events.push(e);
-        last.delta += Number(e.shares || 0);
-      } else {
-        dateGroups.push({ date: d, events: [e], delta: Number(e.shares || 0) });
+    const refDate = referenceDate ? dayjs(referenceDate) : dayjs();
+    const dY = daysInYear || 365;
+
+    // Group by allocation so transfers from one allocation FIFO-consume only
+    // that allocation's additions. Loose / unallocated entries land under the
+    // 'unknown' bucket together.
+    const byAlloc = new Map();
+    for (const e of entries) {
+      const key = e.allocation_id || `unknown-${e.allocation_no || ''}`;
+      if (!byAlloc.has(key)) byAlloc.set(key, []);
+      byAlloc.get(key).push(e);
+    }
+
+    const cohorts = [];
+    for (const [allocKey, allocEntries] of byAlloc.entries()) {
+      const adds = allocEntries
+        .filter(e => Number(e.shares) > 0)
+        .map(e => ({ ...e, _remaining: Number(e.shares) }))
+        .sort((a, b) => dayjs(a.payment_date).valueOf() - dayjs(b.payment_date).valueOf());
+      const subs = allocEntries
+        .filter(e => Number(e.shares) < 0)
+        .sort((a, b) => dayjs(a.payment_date).valueOf() - dayjs(b.payment_date).valueOf());
+
+      for (const sub of subs) {
+        let needed = -Number(sub.shares);
+        const subDate = dayjs(sub.payment_date);
+        for (const p of adds) {
+          if (needed <= 0) break;
+          if (p._remaining <= 0) continue;
+          const take = Math.min(p._remaining, needed);
+          const addDate = dayjs(p.payment_date);
+          const days = subDate.diff(addDate, 'day');
+          if (days > 0) {
+            cohorts.push({
+              key: `c-${allocKey}-${p.investment_id}-${sub.investment_id}`,
+              shares: take,
+              startDate: addDate,
+              endDate: subDate.subtract(1, 'day'),
+              days,
+              weighted: take * days / dY,
+              sourceKind: p.kind,
+              sourceAlloc: p.allocation_no,
+              sourceInvId: p.investment_id,
+              outcomeKind: sub.kind,
+              outcomeRef: sub.reference_no,
+              outcomeInvId: sub.investment_id,
+              outcomeDate: subDate,
+              stayed: false,
+            });
+          }
+          p._remaining -= take;
+          needed -= take;
+        }
+      }
+
+      // Anything unconsumed stayed with the shareholder until the reference date.
+      for (const p of adds) {
+        if (p._remaining > 0) {
+          const addDate = dayjs(p.payment_date);
+          const days = refDate.diff(addDate, 'day');
+          if (days > 0) {
+            cohorts.push({
+              key: `c-${allocKey}-${p.investment_id}-stayed`,
+              shares: p._remaining,
+              startDate: addDate,
+              endDate: refDate,
+              days,
+              weighted: p._remaining * days / dY,
+              sourceKind: p.kind,
+              sourceAlloc: p.allocation_no,
+              sourceInvId: p.investment_id,
+              outcomeKind: null,
+              outcomeRef: null,
+              outcomeInvId: null,
+              outcomeDate: null,
+              stayed: true,
+            });
+          }
+        }
       }
     }
-    const refDate = referenceDate ? dayjs(referenceDate) : dayjs();
-    const phased = [];
-    let cumulative = 0;
-    for (let i = 0; i < dateGroups.length; i++) {
-      const g = dateGroups[i];
-      cumulative += g.delta;
-      const startDate = dayjs(g.date);
-      const isLast = i === dateGroups.length - 1;
-      const nextEventDate = isLast ? refDate : dayjs(dateGroups[i + 1].date);
-      const displayEnd = isLast ? refDate : nextEventDate.subtract(1, 'day');
-      const days = nextEventDate.diff(startDate, 'day');
-      if (days <= 0) continue;
-      phased.push({
-        key: `phase-${i}`,
-        startDate, endDate: displayEnd,
-        shares: cumulative,
-        days,
-        weighted: cumulative * days / (daysInYear || 365),
-        events: g.events,
-        allocationNos: [...new Set(g.events.map(e => e.allocation_no).filter(Boolean))].join(', '),
-        kinds: [...new Set(g.events.map(e => e.kind))].join(', '),
-      });
-    }
-    return phased;
+
+    // Display order: by source date asc, then by outcome date asc
+    // (stayed last within each source so departures lead the narrative).
+    cohorts.sort((a, b) => {
+      const d = a.startDate.valueOf() - b.startDate.valueOf();
+      if (d !== 0) return d;
+      const ad = a.outcomeDate ? a.outcomeDate.valueOf() : Number.MAX_SAFE_INTEGER;
+      const bd = b.outcomeDate ? b.outcomeDate.valueOf() : Number.MAX_SAFE_INTEGER;
+      return ad - bd;
+    });
+    return cohorts;
   };
 
   // Print the breakdown in the operator's current view. Opens a new window
@@ -166,24 +235,29 @@ export default function Dividends() {
       </div>`;
     if (isPhasedView) {
       body += `<table><thead><tr>
-        <th>Period</th><th>Allocation</th><th>Kind</th>
-        <th class="num">Net Shares Held</th><th class="num">Days</th>
-        <th class="num">Weighted Shares</th><th>Formula</th>
+        <th>Period (held)</th><th class="num">Shares</th><th>Allocation</th>
+        <th>Source</th><th>Outcome</th>
+        <th class="num">Days</th><th class="num">Weighted Shares</th><th>Formula</th>
       </tr></thead><tbody>`;
       let total = 0;
       for (const p of phased) {
         total += p.weighted;
+        const sourceLabel = ({ original: 'Purchase', transfer_in: 'Transfer In', dividend: 'Reinvest' })[p.sourceKind] || p.sourceKind;
+        const outcomeLabel = p.stayed
+          ? 'Stayed to reference'
+          : `Transferred ${p.outcomeDate?.format('YYYY-MM-DD')} (${p.outcomeRef || `#${p.outcomeInvId}`})`;
         body += `<tr>
           <td>${p.startDate.format('YYYY-MM-DD')} → ${p.endDate.format('YYYY-MM-DD')}</td>
-          <td>${p.allocationNos || '—'}</td>
-          <td>${p.kinds || '—'}</td>
-          <td class="num ${p.shares < 0 ? 'neg' : 'pos'}">${formatNumber(p.shares)}</td>
+          <td class="num pos">${formatNumber(p.shares)}</td>
+          <td>${p.sourceAlloc || '—'}</td>
+          <td>${sourceLabel} (Inv #${p.sourceInvId})</td>
+          <td>${outcomeLabel}</td>
           <td class="num">${p.days}</td>
-          <td class="num ${p.weighted < 0 ? 'neg' : 'pos'}">${p.weighted.toFixed(4)}</td>
+          <td class="num pos">${p.weighted.toFixed(4)}</td>
           <td>${p.shares} × ${p.days} ÷ ${breakdown.days_in_year || 365}</td>
         </tr>`;
       }
-      body += `<tr class="tot"><td colspan="5">Total weighted shares</td>
+      body += `<tr class="tot"><td colspan="6">Total weighted shares</td>
         <td class="num">${total.toFixed(4)}</td><td>× ETB ${Number(breakdown.dividend_per_share || 0).toFixed(4)} = ETB ${(total * (breakdown.dividend_per_share || 0)).toFixed(2)}</td>
       </tr></tbody></table>`;
     } else {
@@ -673,11 +747,11 @@ export default function Dividends() {
                   size="small"
                   checked={isPhased(record.id)}
                   onChange={() => toggleBreakdownView(record.id)}
-                  checkedChildren="Phased"
+                  checkedChildren="Cohort"
                   unCheckedChildren="Audit"
                 />
                 <Text type="secondary" style={{ fontSize: 11 }}>
-                  {isPhased(record.id) ? 'positive-only periods' : 'per-event with negatives'}
+                  {isPhased(record.id) ? 'positive cohorts (per share lot)' : 'per-event with negatives'}
                 </Text>
               </Space>
               <Button size="small" icon={<PrinterOutlined />}
@@ -741,40 +815,43 @@ export default function Dividends() {
               size="small"
               pagination={false}
               columns={[
-                { title: 'Period', key: 'period', render: (_, p) => (
+                { title: 'Period (held)', key: 'period', render: (_, p) => (
                   <div>
                     <div><Text strong>{p.startDate.format('YYYY-MM-DD')}</Text> → <Text strong>{p.endDate.format('YYYY-MM-DD')}</Text></div>
                     <Text type="secondary" style={{ fontSize: 11 }}>{p.days} days</Text>
                   </div>
                 ) },
-                { title: 'Allocation(s)', dataIndex: 'allocationNos', render: v => v || '—' },
-                { title: 'Triggered by', dataIndex: 'kinds', render: (k, p) => {
-                  // Show one tag per distinct kind that produced this boundary
-                  const kinds = (k || '').split(', ').filter(Boolean);
+                { title: 'Shares', dataIndex: 'shares', render: v => (
+                  <Text strong style={{ color: '#3f8600' }}>{formatNumber(v)}</Text>
+                ) },
+                { title: 'Allocation', dataIndex: 'sourceAlloc', render: v => v || '—' },
+                { title: 'Source', key: 'source', render: (_, p) => {
                   const map = {
                     original:     { color: 'default', label: 'Purchase' },
                     transfer_in:  { color: 'green',   label: 'Transfer In' },
-                    transfer_out: { color: 'red',     label: 'Transfer Out' },
                     dividend:     { color: 'cyan',    label: 'Reinvest' },
                   };
-                  return <Space size={2}>{kinds.map(kk => {
-                    const m = map[kk] || { color: 'default', label: kk };
-                    return <Tag key={kk} color={m.color}>{m.label}</Tag>;
-                  })}</Space>;
+                  const m = map[p.sourceKind] || { color: 'default', label: p.sourceKind };
+                  return (
+                    <Space direction="vertical" size={0}>
+                      <Tag color={m.color}>{m.label}</Tag>
+                      <Text type="secondary" style={{ fontSize: 11 }}>Inv #{p.sourceInvId}</Text>
+                    </Space>
+                  );
                 }},
-                { title: 'Net Shares Held', dataIndex: 'shares', render: v => {
-                  const n = Number(v);
-                  return <Text strong style={{ color: n < 0 ? '#cf1322' : n > 0 ? '#3f8600' : undefined }}>
-                    {formatNumber(v)}
-                  </Text>;
+                { title: 'Outcome', key: 'outcome', render: (_, p) => {
+                  if (p.stayed) return <Tag color="blue">Stayed to reference</Tag>;
+                  return (
+                    <Space direction="vertical" size={0}>
+                      <Tag color="red">Transferred {p.outcomeDate?.format('YYYY-MM-DD')}</Tag>
+                      <Text type="secondary" style={{ fontSize: 11 }}>{p.outcomeRef || `Inv #${p.outcomeInvId}`}</Text>
+                    </Space>
+                  );
                 }},
                 { title: 'Days', dataIndex: 'days' },
-                { title: 'Weighted Shares', dataIndex: 'weighted', render: v => {
-                  const n = Number(v);
-                  return <Text strong style={{ color: n < 0 ? '#cf1322' : n > 0 ? '#3f8600' : undefined }}>
-                    {n.toFixed(4)}
-                  </Text>;
-                }},
+                { title: 'Weighted Shares', dataIndex: 'weighted',
+                  render: v => <Text strong style={{ color: '#3f8600' }}>{Number(v).toFixed(4)}</Text>
+                },
                 { title: 'Formula', key: 'formula',
                   render: (_, p) => <Text type="secondary" style={{ fontFamily: 'monospace', fontSize: 12 }}>
                     {p.shares} × {p.days} ÷ {b?.days_in_year || 365}
@@ -784,7 +861,7 @@ export default function Dividends() {
                 const total = rows.reduce((s, r) => s + Number(r.weighted || 0), 0);
                 return (
                   <Table.Summary.Row>
-                    <Table.Summary.Cell index={0} colSpan={5}><Text strong>Total weighted shares</Text></Table.Summary.Cell>
+                    <Table.Summary.Cell index={0} colSpan={6}><Text strong>Total weighted shares</Text></Table.Summary.Cell>
                     <Table.Summary.Cell index={1}><Text strong style={{ color: '#d32f2f' }}>{total.toFixed(4)}</Text></Table.Summary.Cell>
                     <Table.Summary.Cell index={2}><Text type="secondary">× ETB {Number(b?.dividend_per_share || 0).toFixed(4)} = ETB {(total * Number(b?.dividend_per_share || 0)).toFixed(2)}</Text></Table.Summary.Cell>
                   </Table.Summary.Row>

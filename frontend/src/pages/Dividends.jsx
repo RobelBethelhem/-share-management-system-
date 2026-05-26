@@ -138,11 +138,17 @@ export default function Dividends() {
       //   which is the correct decomposition of the per-investment formula
       //   the backend uses. Two events both older than dY days clamp to the
       //   same auditDays and the cohort contributes zero (matches audit).
-      const fyDays = Math.max(0, auditDays(addDate) - auditDays(subDate));
+      const aAdd = auditDays(addDate);
+      const aSub = auditDays(subDate);
+      const fyDays = Math.max(0, aAdd - aSub);
       // Raw ownership length is kept for the "Period" tooltip so the user
       // can see when the FY clamp shortened the counted period vs the
       // actual time the shareholder held those shares.
       const rawDays = Math.max(0, subDate.diff(addDate, 'day'));
+      // "preFY": both endpoints clamped at dY → entirely outside the FY
+      // window. Contributes zero to this dividend and was already accounted
+      // for in the prior FY's processing. Hidden by the table filter.
+      const preFY = aAdd === dY && aSub === dY;
       cohorts.push({
         key: `c-${p.investment_id}-${sub.investment_id}`,
         shares: take,
@@ -161,6 +167,7 @@ export default function Dividends() {
         stayed: false,
         sameDay: rawDays === 0,
         crossAlloc: p.allocation_id !== sub.allocation_id,
+        preFY,
       });
     };
 
@@ -228,6 +235,7 @@ export default function Dividends() {
             stayed: true,
             sameDay: rawDays === 0,
             crossAlloc: false,
+            preFY: false, // stayed cohorts always contribute to the current FY
           });
         }
       }
@@ -279,7 +287,11 @@ export default function Dividends() {
     const sh = dividend.shareholder || {};
     const refStr = breakdown.reference_date ? dayjs(breakdown.reference_date).format('YYYY-MM-DD') : '—';
     const isPhasedView = useView === 'phased';
-    const phased = isPhasedView ? computePhasedRows(breakdown.investments || [], breakdown.days_in_year, breakdown.reference_date) : [];
+    // Print mirrors the on-screen filter: cohorts entirely outside the
+    // fiscal year are hidden (zero contribution, counted in the prior FY).
+    const phased = isPhasedView
+      ? computePhasedRows(breakdown.investments || [], breakdown.days_in_year, breakdown.reference_date).filter(c => !c.preFY)
+      : [];
     const w = window.open('', '_blank');
     let body = `<!DOCTYPE html><html><head><title>Dividend Breakdown — ${sh.account_no || ''}</title>
       <style>
@@ -883,8 +895,13 @@ export default function Dividends() {
             </Descriptions>
           )}
           {isPhased(record.id) ? (() => {
-            const cohortRows = computePhasedRows(b?.investments || [], b?.days_in_year, b?.reference_date);
-            const cohortTotal = cohortRows.reduce((s, r) => s + Number(r.weighted || 0), 0);
+            const cohortRowsAll = computePhasedRows(b?.investments || [], b?.days_in_year, b?.reference_date);
+            // Hide cohorts that fall entirely OUTSIDE the fiscal year window.
+            // They contribute zero to this dividend (already counted in the
+            // prior FY's processing) and just clutter the view.
+            const cohortRows = cohortRowsAll.filter(c => !c.preFY);
+            const hiddenCount = cohortRowsAll.length - cohortRows.length;
+            const cohortTotal = cohortRowsAll.reduce((s, r) => s + Number(r.weighted || 0), 0);
             const auditTotal = (b?.investments || []).reduce((s, r) => s + Number(r.weighted_shares || 0), 0);
             const matches = Math.abs(cohortTotal - auditTotal) < 0.0005;
             return (
@@ -896,6 +913,10 @@ export default function Dividends() {
                   message={matches
                     ? `Cohort total matches Audit total: ${cohortTotal.toFixed(4)} weighted shares.`
                     : `Cohort total (${cohortTotal.toFixed(4)}) differs from Audit total (${auditTotal.toFixed(4)}) by ${(cohortTotal - auditTotal).toFixed(4)}. Look for ⚠ orphan rows — they flag transfer_outs whose source the cohort view couldn't locate.`
+                  }
+                  description={hiddenCount > 0
+                    ? `${hiddenCount} cohort row${hiddenCount === 1 ? '' : 's'} hidden because they fall entirely before this fiscal year — they're zero-contribution here and were processed in the previous FY's dividend.`
+                    : null
                   }
                 />
                 <Table

@@ -104,90 +104,149 @@ export default function Dividends() {
   //   100 shares  Sep 10 → Jun 30 (293 days, stayed)
   const computePhasedRows = (entries, daysInYear, referenceDate) => {
     if (!entries?.length) return [];
-    const refDate = referenceDate ? dayjs(referenceDate) : dayjs();
+    const refDate = referenceDate ? dayjs(referenceDate).startOf('day') : dayjs().startOf('day');
     const dY = daysInYear || 365;
 
-    // Group by allocation so transfers from one allocation FIFO-consume only
-    // that allocation's additions. Loose / unallocated entries land under the
-    // 'unknown' bucket together.
+    // Bucket per allocation_id (with a stable 'unknown' bucket for legacy
+    // rows). Within each bucket we'll FIFO-consume subs from adds.
     const byAlloc = new Map();
     for (const e of entries) {
       const key = e.allocation_id || `unknown-${e.allocation_no || ''}`;
-      if (!byAlloc.has(key)) byAlloc.set(key, []);
-      byAlloc.get(key).push(e);
+      if (!byAlloc.has(key)) byAlloc.set(key, { adds: [], subs: [] });
+      const n = Number(e.shares || 0);
+      const wrapped = { ...e, _remaining: Math.abs(n) };
+      if (n > 0) byAlloc.get(key).adds.push(wrapped);
+      else if (n < 0) byAlloc.get(key).subs.push(wrapped);
+    }
+    // Sort each bucket by date.
+    for (const bucket of byAlloc.values()) {
+      bucket.adds.sort((a, b) => dayjs(a.payment_date).valueOf() - dayjs(b.payment_date).valueOf());
+      bucket.subs.sort((a, b) => dayjs(a.payment_date).valueOf() - dayjs(b.payment_date).valueOf());
     }
 
     const cohorts = [];
-    for (const [allocKey, allocEntries] of byAlloc.entries()) {
-      const adds = allocEntries
-        .filter(e => Number(e.shares) > 0)
-        .map(e => ({ ...e, _remaining: Number(e.shares) }))
-        .sort((a, b) => dayjs(a.payment_date).valueOf() - dayjs(b.payment_date).valueOf());
-      const subs = allocEntries
-        .filter(e => Number(e.shares) < 0)
-        .sort((a, b) => dayjs(a.payment_date).valueOf() - dayjs(b.payment_date).valueOf());
+    const pushConsumption = (p, sub, take) => {
+      const addDate = dayjs(p.payment_date).startOf('day');
+      const subDate = dayjs(sub.payment_date).startOf('day');
+      // Whole days using date-only math — matches the backend's daysHeld
+      // after the same-day fix. days = 0 when buy and transfer share a date,
+      // which we now render explicitly instead of dropping.
+      const days = Math.max(0, subDate.diff(addDate, 'day'));
+      cohorts.push({
+        key: `c-${p.investment_id}-${sub.investment_id}`,
+        shares: take,
+        startDate: addDate,
+        endDate: days > 0 ? subDate.subtract(1, 'day') : subDate,
+        days,
+        weighted: take * days / dY,
+        sourceKind: p.kind,
+        sourceAlloc: p.allocation_no,
+        sourceInvId: p.investment_id,
+        outcomeKind: sub.kind,
+        outcomeRef: sub.reference_no,
+        outcomeInvId: sub.investment_id,
+        outcomeDate: subDate,
+        stayed: false,
+        sameDay: days === 0,
+        crossAlloc: p.allocation_id !== sub.allocation_id,
+      });
+    };
 
-      for (const sub of subs) {
-        let needed = -Number(sub.shares);
-        const subDate = dayjs(sub.payment_date);
-        for (const p of adds) {
-          if (needed <= 0) break;
+    // Phase 1 — per-allocation FIFO (the common, correct case).
+    for (const bucket of byAlloc.values()) {
+      for (const sub of bucket.subs) {
+        for (const p of bucket.adds) {
+          if (sub._remaining <= 0) break;
           if (p._remaining <= 0) continue;
-          const take = Math.min(p._remaining, needed);
-          const addDate = dayjs(p.payment_date);
-          const days = subDate.diff(addDate, 'day');
-          if (days > 0) {
-            cohorts.push({
-              key: `c-${allocKey}-${p.investment_id}-${sub.investment_id}`,
-              shares: take,
-              startDate: addDate,
-              endDate: subDate.subtract(1, 'day'),
-              days,
-              weighted: take * days / dY,
-              sourceKind: p.kind,
-              sourceAlloc: p.allocation_no,
-              sourceInvId: p.investment_id,
-              outcomeKind: sub.kind,
-              outcomeRef: sub.reference_no,
-              outcomeInvId: sub.investment_id,
-              outcomeDate: subDate,
-              stayed: false,
-            });
-          }
+          const take = Math.min(p._remaining, sub._remaining);
+          pushConsumption(p, sub, take);
           p._remaining -= take;
-          needed -= take;
-        }
-      }
-
-      // Anything unconsumed stayed with the shareholder until the reference date.
-      for (const p of adds) {
-        if (p._remaining > 0) {
-          const addDate = dayjs(p.payment_date);
-          const days = refDate.diff(addDate, 'day');
-          if (days > 0) {
-            cohorts.push({
-              key: `c-${allocKey}-${p.investment_id}-stayed`,
-              shares: p._remaining,
-              startDate: addDate,
-              endDate: refDate,
-              days,
-              weighted: p._remaining * days / dY,
-              sourceKind: p.kind,
-              sourceAlloc: p.allocation_no,
-              sourceInvId: p.investment_id,
-              outcomeKind: null,
-              outcomeRef: null,
-              outcomeInvId: null,
-              outcomeDate: null,
-              stayed: true,
-            });
-          }
+          sub._remaining -= take;
         }
       }
     }
 
-    // Display order: by source date asc, then by outcome date asc
-    // (stayed last within each source so departures lead the narrative).
+    // Phase 2 — global FIFO fallback for any sub left unconsumed. Happens
+    // when the transfer_out's allocation_id doesn't line up with where the
+    // shareholder actually got those shares (data inconsistency or legacy
+    // unlinked-pool transfers). Without this, the cohort total would fall
+    // short of the audit total and the user sees mismatched numbers.
+    const globalAdds = [];
+    for (const bucket of byAlloc.values()) {
+      for (const p of bucket.adds) if (p._remaining > 0) globalAdds.push(p);
+    }
+    globalAdds.sort((a, b) => dayjs(a.payment_date).valueOf() - dayjs(b.payment_date).valueOf());
+    for (const bucket of byAlloc.values()) {
+      for (const sub of bucket.subs) {
+        if (sub._remaining <= 0) continue;
+        for (const p of globalAdds) {
+          if (sub._remaining <= 0) break;
+          if (p._remaining <= 0) continue;
+          const take = Math.min(p._remaining, sub._remaining);
+          pushConsumption(p, sub, take);
+          p._remaining -= take;
+          sub._remaining -= take;
+        }
+      }
+    }
+
+    // Phase 3 — remaining adds → "stayed to reference" cohorts.
+    for (const bucket of byAlloc.values()) {
+      for (const p of bucket.adds) {
+        if (p._remaining > 0) {
+          const addDate = dayjs(p.payment_date).startOf('day');
+          const days = Math.max(0, refDate.diff(addDate, 'day'));
+          cohorts.push({
+            key: `c-${p.investment_id}-stayed`,
+            shares: p._remaining,
+            startDate: addDate,
+            endDate: refDate,
+            days,
+            weighted: p._remaining * days / dY,
+            sourceKind: p.kind,
+            sourceAlloc: p.allocation_no,
+            sourceInvId: p.investment_id,
+            outcomeKind: null,
+            outcomeRef: null,
+            outcomeInvId: null,
+            outcomeDate: null,
+            stayed: true,
+            sameDay: days === 0,
+            crossAlloc: false,
+          });
+        }
+      }
+    }
+
+    // Phase 4 — orphan subs (transfer_outs with no source anywhere). Surface
+    // as a warning row so the operator sees that the audit total includes
+    // shares the cohort view couldn't attribute.
+    for (const bucket of byAlloc.values()) {
+      for (const sub of bucket.subs) {
+        if (sub._remaining > 0) {
+          const subDate = dayjs(sub.payment_date).startOf('day');
+          cohorts.push({
+            key: `orphan-${sub.investment_id}`,
+            shares: sub._remaining,
+            startDate: subDate,
+            endDate: subDate,
+            days: 0,
+            weighted: 0,
+            sourceKind: null,
+            sourceAlloc: sub.allocation_no,
+            sourceInvId: null,
+            outcomeKind: sub.kind,
+            outcomeRef: sub.reference_no,
+            outcomeInvId: sub.investment_id,
+            outcomeDate: subDate,
+            stayed: false,
+            sameDay: true,
+            orphan: true,
+          });
+        }
+      }
+    }
+
     cohorts.sort((a, b) => {
       const d = a.startDate.valueOf() - b.startDate.valueOf();
       if (d !== 0) return d;
@@ -808,17 +867,41 @@ export default function Dividends() {
               <Descriptions.Item label="Net (live)"><Text strong style={{ color: '#d32f2f' }}>{formatCurrency(b.live.net)}</Text></Descriptions.Item>
             </Descriptions>
           )}
-          {isPhased(record.id) ? (
-            <Table
-              dataSource={computePhasedRows(b?.investments || [], b?.days_in_year, b?.reference_date)}
+          {isPhased(record.id) ? (() => {
+            const cohortRows = computePhasedRows(b?.investments || [], b?.days_in_year, b?.reference_date);
+            const cohortTotal = cohortRows.reduce((s, r) => s + Number(r.weighted || 0), 0);
+            const auditTotal = (b?.investments || []).reduce((s, r) => s + Number(r.weighted_shares || 0), 0);
+            const matches = Math.abs(cohortTotal - auditTotal) < 0.0005;
+            return (
+              <>
+                <Alert
+                  type={matches ? 'success' : 'warning'}
+                  showIcon
+                  style={{ marginBottom: 8 }}
+                  message={matches
+                    ? `Cohort total matches Audit total: ${cohortTotal.toFixed(4)} weighted shares.`
+                    : `Cohort total (${cohortTotal.toFixed(4)}) differs from Audit total (${auditTotal.toFixed(4)}) by ${(cohortTotal - auditTotal).toFixed(4)}. Look for ⚠ orphan rows — they flag transfer_outs whose source the cohort view couldn't locate.`
+                  }
+                />
+                <Table
+                  dataSource={cohortRows}
               rowKey="key"
               size="small"
               pagination={false}
               columns={[
                 { title: 'Period (held)', key: 'period', render: (_, p) => (
                   <div>
-                    <div><Text strong>{p.startDate.format('YYYY-MM-DD')}</Text> → <Text strong>{p.endDate.format('YYYY-MM-DD')}</Text></div>
-                    <Text type="secondary" style={{ fontSize: 11 }}>{p.days} days</Text>
+                    {p.sameDay && !p.orphan ? (
+                      <>
+                        <div><Text strong>{p.startDate.format('YYYY-MM-DD')}</Text></div>
+                        <Text type="secondary" style={{ fontSize: 11 }}>same-day · 0 days</Text>
+                      </>
+                    ) : (
+                      <>
+                        <div><Text strong>{p.startDate.format('YYYY-MM-DD')}</Text> → <Text strong>{p.endDate.format('YYYY-MM-DD')}</Text></div>
+                        <Text type="secondary" style={{ fontSize: 11 }}>{p.days} days{p.crossAlloc ? ' · cross-allocation' : ''}</Text>
+                      </>
+                    )}
                   </div>
                 ) },
                 { title: 'Shares', dataIndex: 'shares', render: v => (
@@ -826,6 +909,9 @@ export default function Dividends() {
                 ) },
                 { title: 'Allocation', dataIndex: 'sourceAlloc', render: v => v || '—' },
                 { title: 'Source', key: 'source', render: (_, p) => {
+                  if (p.orphan) {
+                    return <Tag color="warning">⚠ orphan transfer</Tag>;
+                  }
                   const map = {
                     original:     { color: 'default', label: 'Purchase' },
                     transfer_in:  { color: 'green',   label: 'Transfer In' },
@@ -868,7 +954,9 @@ export default function Dividends() {
                 );
               }}
             />
-          ) : (
+              </>
+            );
+          })() : (
           <Table
             dataSource={b?.investments || []}
             rowKey="investment_id"

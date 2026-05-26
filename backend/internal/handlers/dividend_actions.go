@@ -694,10 +694,18 @@ func GetDividendBreakdown(c *gin.Context) {
 		if inv.PaymentDate == nil {
 			continue
 		}
-		// Days held = end - payment_date (clamped to [0, days_in_year])
-		daysHeld := endDate.Sub(*inv.PaymentDate).Hours() / 24
+		// Days held = end_date − payment_date in WHOLE DAYS.
+		// Use date-only comparison (truncate both to midnight) so a transfer
+		// recorded at 14:00 on the same calendar day as the reference date
+		// gets daysHeld = 0 (and stays visible in the audit trail) instead
+		// of a fractional negative that the old comparison silently skipped.
+		endDay := time.Date(endDate.Year(), endDate.Month(), endDate.Day(),
+			0, 0, 0, 0, endDate.Location())
+		payDay := time.Date(inv.PaymentDate.Year(), inv.PaymentDate.Month(), inv.PaymentDate.Day(),
+			0, 0, 0, 0, inv.PaymentDate.Location())
+		daysHeld := endDay.Sub(payDay).Hours() / 24
 		if daysHeld < 0 {
-			continue // payment after reference date — doesn't contribute
+			continue // payment AFTER reference date — doesn't contribute
 		}
 		if daysHeld > daysInYear {
 			daysHeld = daysInYear

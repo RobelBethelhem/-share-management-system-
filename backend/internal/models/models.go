@@ -237,6 +237,12 @@ type TransferLine struct {
 type DividendSetting struct {
 	ID                uint       `gorm:"primaryKey" json:"id"`
 	FiscalYear        string     `gorm:"size:20;uniqueIndex;not null" json:"fiscal_year"`
+	// ReferenceStartDate is the inclusive START of the dividend period.
+	// Used together with ReferenceDate (end) for overlap detection so two
+	// fiscal years can't cover the same days. Optional for legacy rows;
+	// when nil, the period is treated as (ReferenceDate − DaysInYear + 1)
+	// for backward compatibility.
+	ReferenceStartDate *time.Time `json:"reference_start_date"`
 	ReferenceDate     *time.Time `json:"reference_date"`
 	DaysInYear        int        `gorm:"default:365" json:"days_in_year"`
 	DeclaredAmount    float64    `gorm:"type:decimal(18,2)" json:"declared_amount"`

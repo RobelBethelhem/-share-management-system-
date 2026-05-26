@@ -312,6 +312,7 @@ export default function DividendSettings() {
 
   const handleSubmit = async (values) => {
     try {
+      if (values.reference_start_date) values.reference_start_date = values.reference_start_date.toISOString();
       if (values.reference_date) values.reference_date = values.reference_date.toISOString();
       if (values.tax_grace_period) values.tax_grace_period = values.tax_grace_period.toISOString();
       if (editing) {
@@ -328,6 +329,17 @@ export default function DividendSettings() {
     } catch (err) {
       message.error(err.response?.data?.error || 'Failed');
     }
+  };
+
+  // When either date changes, recompute Days = (end − start) + 1. Keeps the
+  // field editable so the operator can override (e.g., a 366-day leap year
+  // or a stub partial year).
+  const recomputeDays = () => {
+    const start = form.getFieldValue('reference_start_date');
+    const end = form.getFieldValue('reference_date');
+    if (!start || !end) return;
+    const days = end.diff(start, 'day') + 1;
+    if (days > 0) form.setFieldValue('days_in_year', days);
   };
 
   const handleProcess = async (id) => {
@@ -381,7 +393,17 @@ export default function DividendSettings() {
   // ── Tables ──
   const columns = [
     { title: 'Fiscal Year', dataIndex: 'fiscal_year', width: 100 },
-    { title: 'Reference Date', dataIndex: 'reference_date', render: d => d ? dayjs(d).format('YYYY-MM-DD') : '-' },
+    { title: 'Period', key: 'period', width: 220,
+      render: (_, r) => {
+        const end = r.reference_date ? dayjs(r.reference_date) : null;
+        const start = r.reference_start_date ? dayjs(r.reference_start_date) : (end && r.days_in_year ? end.subtract(r.days_in_year - 1, 'day') : null);
+        if (!end) return '-';
+        return (
+          <span style={{ fontSize: 12 }}>
+            {start ? start.format('YYYY-MM-DD') : '?'} → {end.format('YYYY-MM-DD')}
+          </span>
+        );
+      }},
     { title: 'Days', dataIndex: 'days_in_year', width: 60 },
     { title: 'Declared Amount', dataIndex: 'declared_amount', render: v => formatCurrency(v) },
     { title: 'DPS', dataIndex: 'dividend_per_share', render: v => v ? v.toFixed(4) : '-' },
@@ -396,6 +418,7 @@ export default function DividendSettings() {
                 setEditing(r);
                 form.setFieldsValue({
                   ...r,
+                  reference_start_date: r.reference_start_date ? dayjs(r.reference_start_date) : null,
                   reference_date: r.reference_date ? dayjs(r.reference_date) : null,
                   tax_grace_period: r.tax_grace_period ? dayjs(r.tax_grace_period) : null,
                 });
@@ -470,7 +493,22 @@ export default function DividendSettings() {
             <Button type="primary" icon={<PlusOutlined />} onClick={() => {
               setEditing(null);
               form.resetFields();
-              form.setFieldsValue({ days_in_year: 365 });
+              // Suggest the day AFTER the most-recent existing fiscal year's
+              // reference_date as the new period's start. Avoids the operator
+              // accidentally double-counting the same year.
+              let suggestedStart = null;
+              if (data.length > 0) {
+                const latest = [...data]
+                  .filter(d => d.reference_date)
+                  .sort((a, b) => dayjs(b.reference_date).valueOf() - dayjs(a.reference_date).valueOf())[0];
+                if (latest?.reference_date) {
+                  suggestedStart = dayjs(latest.reference_date).add(1, 'day');
+                }
+              }
+              form.setFieldsValue({
+                days_in_year: 365,
+                reference_start_date: suggestedStart,
+              });
               setModalOpen(true);
             }}>
               New Fiscal Year
@@ -588,17 +626,34 @@ export default function DividendSettings() {
             <Input placeholder="e.g. 2023/2024" />
           </Form.Item>
           <Row gutter={16}>
-            <Col span={12}>
-              <Form.Item name="reference_date" label="Reference Date" tooltip="Cut-off date for share calculations">
-                <DatePicker style={{ width: '100%' }} />
+            <Col span={8}>
+              <Form.Item name="reference_start_date" label="Period Start (inclusive)"
+                tooltip="The first day of this dividend's earning period. Used for overlap detection against other fiscal years."
+                rules={[{ required: true, message: 'Pick the period start date' }]}>
+                <DatePicker style={{ width: '100%' }} onChange={recomputeDays} />
               </Form.Item>
             </Col>
-            <Col span={12}>
-              <Form.Item name="days_in_year" label="Days in Year">
-                <InputNumber style={{ width: '100%' }} />
+            <Col span={8}>
+              <Form.Item name="reference_date" label="Reference Date (end, inclusive)"
+                tooltip="Cut-off date for share calculations — the last day of this dividend's earning period."
+                rules={[{ required: true, message: 'Pick the reference (end) date' }]}>
+                <DatePicker style={{ width: '100%' }} onChange={recomputeDays} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="days_in_year" label="Days in Period"
+                tooltip="Auto-computed from start → end (inclusive). Editable — set 366 for a leap year or override for a stub partial year.">
+                <InputNumber style={{ width: '100%' }} min={1} max={400} />
               </Form.Item>
             </Col>
           </Row>
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message="Period validation"
+            description="Two fiscal years cannot cover overlapping days. The system suggests starting the day after the most recent year ended; you can adjust if needed."
+          />
           <Form.Item name="declared_amount" label="Declared Dividend Amount (Total Pool)" rules={[{ required: true }]}>
             <InputNumber style={{ width: '100%' }} min={0} formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')} />
           </Form.Item>

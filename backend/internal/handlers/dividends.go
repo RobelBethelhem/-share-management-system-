@@ -21,14 +21,120 @@ func GetDividendSettings(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": settings})
 }
 
+// periodOf returns the effective inclusive [start, end] of a dividend
+// setting. If the setting has no explicit start date (legacy rows), the
+// start is derived from (ReferenceDate − DaysInYear + 1) so an overlap
+// check works against either schema. Returns ok=false when there is no
+// reference_date at all (can't reason about a period without it).
+func periodOf(s *models.DividendSetting) (start, end time.Time, ok bool) {
+	if s.ReferenceDate == nil {
+		return time.Time{}, time.Time{}, false
+	}
+	end = *s.ReferenceDate
+	if s.ReferenceStartDate != nil {
+		start = *s.ReferenceStartDate
+	} else {
+		days := s.DaysInYear
+		if days <= 0 {
+			days = 365
+		}
+		start = end.AddDate(0, 0, -(days - 1))
+	}
+	return start, end, true
+}
+
+// validateDividendSettingOverlap rejects a setting whose [start, end] period
+// overlaps with another fiscal year. Two periods overlap when
+// max(start1, start2) ≤ min(end1, end2). excludeID skips the row being updated.
+func validateDividendSettingOverlap(s *models.DividendSetting, excludeID uint) error {
+	start, end, ok := periodOf(s)
+	if !ok {
+		return nil // no reference_date → can't check
+	}
+	if !start.Before(end) && !start.Equal(end) {
+		return fmt.Errorf("reference_start_date (%s) must be on or before reference_date (%s)",
+			start.Format("2006-01-02"), end.Format("2006-01-02"))
+	}
+	var others []models.DividendSetting
+	q := database.DB.Where("reference_date IS NOT NULL")
+	if excludeID > 0 {
+		q = q.Where("id != ?", excludeID)
+	}
+	q.Find(&others)
+	for _, o := range others {
+		oStart, oEnd, ook := periodOf(&o)
+		if !ook {
+			continue
+		}
+		latestStart := start
+		if oStart.After(latestStart) {
+			latestStart = oStart
+		}
+		earliestEnd := end
+		if oEnd.Before(earliestEnd) {
+			earliestEnd = oEnd
+		}
+		if !latestStart.After(earliestEnd) {
+			return fmt.Errorf(
+				"Period [%s → %s] overlaps with existing fiscal year '%s' [%s → %s]. Pick a non-overlapping period (e.g. start the day after the previous one ended).",
+				start.Format("2006-01-02"), end.Format("2006-01-02"),
+				o.FiscalYear,
+				oStart.Format("2006-01-02"), oEnd.Format("2006-01-02"),
+			)
+		}
+	}
+	return nil
+}
+
 func CreateDividendSetting(c *gin.Context) {
 	var setting models.DividendSetting
 	if err := c.ShouldBindJSON(&setting); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	database.DB.Create(&setting)
-	c.JSON(http.StatusCreated, gin.H{"message": "Dividend setting created", "id": setting.ID})
+	if setting.FiscalYear == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "fiscal_year is required"})
+		return
+	}
+	if setting.ReferenceDate == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "reference_date is required"})
+		return
+	}
+
+	// Fiscal-year name uniqueness (clearer than relying on the DB constraint).
+	var nameConflict int64
+	database.DB.Model(&models.DividendSetting{}).
+		Where("fiscal_year = ?", setting.FiscalYear).Count(&nameConflict)
+	if nameConflict > 0 {
+		c.JSON(http.StatusConflict, gin.H{
+			"error": fmt.Sprintf("Fiscal year '%s' already exists. Use a different label.", setting.FiscalYear),
+		})
+		return
+	}
+
+	// Auto-compute days from the period if start is set and days is 0.
+	if setting.ReferenceStartDate != nil && setting.DaysInYear <= 0 {
+		days := int(setting.ReferenceDate.Sub(*setting.ReferenceStartDate).Hours()/24) + 1
+		if days <= 0 {
+			days = 365
+		}
+		setting.DaysInYear = days
+	}
+	if setting.DaysInYear <= 0 {
+		setting.DaysInYear = 365
+	}
+
+	// Period overlap check.
+	if err := validateDividendSettingOverlap(&setting, 0); err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := database.DB.Create(&setting).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"message": "Dividend setting created", "id": setting.ID, "data": setting})
 }
 
 func UpdateDividendSetting(c *gin.Context) {
@@ -42,8 +148,33 @@ func UpdateDividendSetting(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	// Same validations as create, scoped to "any OTHER row".
+	if setting.FiscalYear == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "fiscal_year is required"})
+		return
+	}
+	var nameConflict int64
+	database.DB.Model(&models.DividendSetting{}).
+		Where("fiscal_year = ? AND id != ?", setting.FiscalYear, setting.ID).Count(&nameConflict)
+	if nameConflict > 0 {
+		c.JSON(http.StatusConflict, gin.H{
+			"error": fmt.Sprintf("Fiscal year '%s' already exists.", setting.FiscalYear),
+		})
+		return
+	}
+	if setting.ReferenceStartDate != nil && setting.DaysInYear <= 0 && setting.ReferenceDate != nil {
+		days := int(setting.ReferenceDate.Sub(*setting.ReferenceStartDate).Hours()/24) + 1
+		if days <= 0 {
+			days = 365
+		}
+		setting.DaysInYear = days
+	}
+	if err := validateDividendSettingOverlap(&setting, setting.ID); err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
 	database.DB.Save(&setting)
-	c.JSON(http.StatusOK, gin.H{"message": "Dividend setting updated"})
+	c.JSON(http.StatusOK, gin.H{"message": "Dividend setting updated", "data": setting})
 }
 
 func ProcessDividend(c *gin.Context) {

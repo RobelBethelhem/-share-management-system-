@@ -141,6 +141,17 @@ export default function Investments() {
     try {
       const res = await getShareholderInvestmentSummary(shId);
       setSummary(res.data);
+      // Auto-pick the allocation when there's exactly one with remaining
+      // capacity. Removes a click and forces strict per-allocation
+      // validation on the only target the operator could've meant.
+      const eligible = (res.data?.allocations || []).filter(
+        a => a.payment_status !== 'fully_paid'
+          && (a.allocated_shares - (a.paid_shares || 0) - (a.pending_shares || 0)) > 0
+      );
+      if (eligible.length === 1) {
+        form.setFieldValue('allocation_id', eligible[0].id);
+        handleAllocationSelect(eligible[0].id);
+      }
     } catch { setSummary(null); }
     setSummaryLoading(false);
   };
@@ -167,14 +178,25 @@ export default function Investments() {
     form.validateFields(['amount', 'number_of_shares']).catch(() => {});
   };
 
-  // Caps used by Form.Item validators below. When no allocation is selected,
-  // fall back to the shareholder's total outstanding balance.
+  // Caps used by Form.Item validators below. When an allocation is selected,
+  // subtract BOTH paid and pending so a second pending submission can't slip
+  // through while the first one is still awaiting approval. When no
+  // allocation is picked, fall back to the shareholder's total outstanding
+  // balance minus all the shareholder's pending investments.
+  const totalPending = (summary?.allocations || []).reduce(
+    (s, a) => s + (a.pending_amount || 0), 0);
+  const totalPendingShares = (summary?.allocations || []).reduce(
+    (s, a) => s + (a.pending_shares || 0), 0);
   const capAmount = selectedAlloc
-    ? (selectedAlloc.remaining_amount > 0 ? selectedAlloc.remaining_amount : 0)
-    : (summary?.outstanding_balance > 0 ? summary.outstanding_balance : null);
+    ? Math.max(0, (selectedAlloc.remaining_amount || 0) - (selectedAlloc.pending_amount || 0))
+    : (summary?.outstanding_balance > 0 ? Math.max(0, summary.outstanding_balance - totalPending) : null);
   const capShares = selectedAlloc
-    ? Math.max(0, (selectedAlloc.allocated_shares || 0) - (selectedAlloc.paid_shares || 0))
-    : null;
+    ? Math.max(0, (selectedAlloc.allocated_shares || 0)
+                  - (selectedAlloc.paid_shares || 0)
+                  - (selectedAlloc.pending_shares || 0))
+    : (summary?.total_allocated_shares > 0
+        ? Math.max(0, summary.total_allocated_shares - summary.total_shares_paid - totalPendingShares)
+        : null);
 
   const handlePaymentDateChange = (date) => {
     if (date) {
@@ -444,11 +466,17 @@ export default function Investments() {
             </Card>
           )}
 
-          {/* Allocation selector — only show unpaid/partially paid allocations */}
+          {/* Allocation selector — only show unpaid/partially paid allocations.
+              Required when any eligible allocation exists, so the strict
+              per-allocation cap is always enforced; the unlinked fallback
+              only triggers when the shareholder genuinely has no allocations
+              yet. */}
           {summary?.allocations?.filter(a => a.payment_status !== 'fully_paid').length > 0 && (
             <Form.Item
               name="allocation_id"
               label="Allocation (which allocation is this payment for?)"
+              rules={[{ required: true, message: 'Pick the allocation this payment applies to.' }]}
+              tooltip="The payment will be capped at this allocation's remaining shares + pending."
             >
               <Select
                 placeholder="Select allocation..."
@@ -456,10 +484,15 @@ export default function Investments() {
                 onChange={handleAllocationSelect}
                 options={summary.allocations
                   .filter(a => a.payment_status !== 'fully_paid')
-                  .map(a => ({
-                    value: a.id,
-                    label: `${a.allocation_no} | Round ${a.round}${a.subscription_type ? ` | ${a.subscription_type}` : ''} | ${(a.allocated_shares - a.paid_shares)?.toLocaleString()} remaining shares | ${formatCurrency(a.remaining_amount)} [${statusLabels[a.payment_status] || a.payment_status}]`,
-                  }))}
+                  .map(a => {
+                    const remShares = Math.max(0, (a.allocated_shares || 0) - (a.paid_shares || 0) - (a.pending_shares || 0));
+                    const remAmount = Math.max(0, (a.remaining_amount || 0) - (a.pending_amount || 0));
+                    const pendingHint = a.pending_shares > 0 ? ` · ${a.pending_shares} pending` : '';
+                    return {
+                      value: a.id,
+                      label: `${a.allocation_no} | Round ${a.round}${a.subscription_type ? ` | ${a.subscription_type}` : ''} | ${remShares.toLocaleString()} shares left${pendingHint} | ${formatCurrency(remAmount)} [${statusLabels[a.payment_status] || a.payment_status}]`,
+                    };
+                  })}
               />
             </Form.Item>
           )}

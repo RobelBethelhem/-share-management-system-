@@ -35,7 +35,14 @@ func validateInvestmentCap(inv *models.Investment, excludeInvestmentID uint) (er
 		return nil, nil
 	}
 
-	// Per-allocation cap
+	// Per-allocation cap (strict). The cap correctly accounts for:
+	//   (1) direct approved investments linked via allocation_id
+	//   (2) approved unlinked investments that FIFO-allocate to THIS allocation
+	//       (same logic the UI's summary endpoint uses, so cap matches what
+	//       the operator sees as paid_shares / remaining_amount)
+	//   (3) any pending direct investments against this allocation
+	// Sum = effective approved (FIFO) + pending direct. Anything proposed
+	// beyond (AllocatedShares − sum) is rejected.
 	if inv.AllocationID != nil && *inv.AllocationID > 0 {
 		var alloc models.Allocation
 		if err := database.DB.First(&alloc, *inv.AllocationID).Error; err != nil {
@@ -45,40 +52,64 @@ func validateInvestmentCap(inv *models.Investment, excludeInvestmentID uint) (er
 			return fmt.Errorf("Allocation does not belong to this shareholder"), nil
 		}
 
-		q := database.DB.Model(&models.Investment{}).
-			Where("allocation_id = ? AND status = 'active' AND approval_status IN ('pending','approved') AND payment_method NOT IN ('transfer_in','transfer_out')",
-				*inv.AllocationID)
-		if excludeInvestmentID > 0 {
-			q = q.Where("id != ?", excludeInvestmentID)
+		// (1)+(2): effective FIFO-aware approved paid shares.
+		effPaidShares := computeAllocPaidShares(inv.ShareholderID, alloc.ID)
+		var effPaidAmount float64
+		if alloc.AllocatedShares > 0 {
+			effPaidAmount = float64(effPaidShares) / float64(alloc.AllocatedShares) * alloc.AllocatedAmount
 		}
-		var existingAmount float64
-		var existingShares int64
-		q.Select("COALESCE(SUM(amount), 0)").Scan(&existingAmount)
-		q.Select("COALESCE(SUM(number_of_shares), 0)").Scan(&existingShares)
+		// Defensive: never undercount direct approved amount because of integer
+		// share rounding in (effPaidShares / AllocatedShares) * AllocatedAmount.
+		var directApprovedAmount float64
+		database.DB.Model(&models.Investment{}).
+			Where("allocation_id = ? AND status = 'active' AND approval_status = 'approved' AND payment_method NOT IN ('transfer_in','transfer_out')", alloc.ID).
+			Select("COALESCE(SUM(amount), 0)").Scan(&directApprovedAmount)
+		if directApprovedAmount > effPaidAmount {
+			effPaidAmount = directApprovedAmount
+		}
 
-		maxAmount := alloc.AllocatedAmount - existingAmount
-		maxShares := alloc.AllocatedShares - existingShares
+		// (3): pending direct against this allocation (in-flight commitments).
+		pendQ := database.DB.Model(&models.Investment{}).
+			Where("allocation_id = ? AND status = 'active' AND approval_status = 'pending' AND payment_method NOT IN ('transfer_in','transfer_out')", alloc.ID)
+		if excludeInvestmentID > 0 {
+			pendQ = pendQ.Where("id != ?", excludeInvestmentID)
+		}
+		var pendingShares int64
+		var pendingAmount float64
+		pendQ.Select("COALESCE(SUM(number_of_shares), 0)").Scan(&pendingShares)
+		pendQ.Select("COALESCE(SUM(amount), 0)").Scan(&pendingAmount)
+
+		committedShares := effPaidShares + pendingShares
+		committedAmount := effPaidAmount + pendingAmount
+		maxShares := alloc.AllocatedShares - committedShares
+		maxAmount := alloc.AllocatedAmount - committedAmount
+		if maxShares < 0 {
+			maxShares = 0
+		}
+		if maxAmount < 0 {
+			maxAmount = 0
+		}
 
 		if inv.Amount > maxAmount+0.01 {
 			return fmt.Errorf(
-				"Amount exceeds allocation cap. Allocation %s: allocated %.2f ETB, already paid/pending %.2f ETB, maximum new payment %.2f ETB.",
-				alloc.AllocationNo, alloc.AllocatedAmount, existingAmount, maxAmount,
+				"Amount exceeds allocation cap. Allocation %s: allocated %.2f ETB, already committed %.2f ETB (approved+pending), maximum new payment %.2f ETB.",
+				alloc.AllocationNo, alloc.AllocatedAmount, committedAmount, maxAmount,
 			), gin.H{
 				"allocation_no":     alloc.AllocationNo,
 				"allocated_amount":  alloc.AllocatedAmount,
-				"already_committed": existingAmount,
+				"already_committed": committedAmount,
 				"max_amount":        maxAmount,
 				"attempted":         inv.Amount,
 			}
 		}
 		if inv.NumberOfShares > maxShares {
 			return fmt.Errorf(
-				"Shares exceed allocation cap. Allocation %s: allocated %d shares, already paid/pending %d, maximum new shares %d.",
-				alloc.AllocationNo, alloc.AllocatedShares, existingShares, maxShares,
+				"Shares exceed allocation cap. Allocation %s: allocated %d shares, already committed %d (approved+pending), maximum new shares %d.",
+				alloc.AllocationNo, alloc.AllocatedShares, committedShares, maxShares,
 			), gin.H{
 				"allocation_no":     alloc.AllocationNo,
 				"allocated_shares":  alloc.AllocatedShares,
-				"already_committed": existingShares,
+				"already_committed": committedShares,
 				"max_shares":        maxShares,
 				"attempted":         inv.NumberOfShares,
 			}
@@ -86,13 +117,18 @@ func validateInvestmentCap(inv *models.Investment, excludeInvestmentID uint) (er
 		return nil, nil
 	}
 
-	// Unlinked payment — cap against shareholder's total approved allocations.
+	// Unlinked payment — cap against shareholder's total approved allocations,
+	// validating BOTH amount and shares so a manual share-count override
+	// can't sneak past the amount check.
 	var totalAllocated float64
+	var totalAllocatedShares int64
 	database.DB.Model(&models.Allocation{}).
 		Where("shareholder_id = ? AND approval_status = 'approved'", inv.ShareholderID).
 		Select("COALESCE(SUM(allocated_amount), 0)").Scan(&totalAllocated)
+	database.DB.Model(&models.Allocation{}).
+		Where("shareholder_id = ? AND approval_status = 'approved'", inv.ShareholderID).
+		Select("COALESCE(SUM(allocated_shares), 0)").Scan(&totalAllocatedShares)
 	if totalAllocated <= 0 {
-		// No allocations yet → can't validate. Allow.
 		return nil, nil
 	}
 
@@ -103,18 +139,38 @@ func validateInvestmentCap(inv *models.Investment, excludeInvestmentID uint) (er
 		q = q.Where("id != ?", excludeInvestmentID)
 	}
 	var totalCommitted float64
+	var totalCommittedShares int64
 	q.Select("COALESCE(SUM(amount), 0)").Scan(&totalCommitted)
+	q.Select("COALESCE(SUM(number_of_shares), 0)").Scan(&totalCommittedShares)
 
 	maxAmount := totalAllocated - totalCommitted
+	maxShares := totalAllocatedShares - totalCommittedShares
+	if maxAmount < 0 {
+		maxAmount = 0
+	}
+	if maxShares < 0 {
+		maxShares = 0
+	}
 	if inv.Amount > maxAmount+0.01 {
 		return fmt.Errorf(
-			"Amount exceeds the shareholder's total allocation cap. Total allocated %.2f ETB, already paid/pending %.2f ETB, maximum new payment %.2f ETB. Tip: pick a specific allocation from the dropdown for a tighter cap.",
+			"Amount exceeds the shareholder's total allocation cap. Total allocated %.2f ETB, already committed %.2f ETB (approved+pending), maximum new payment %.2f ETB. Tip: pick a specific allocation from the dropdown for a tighter cap.",
 			totalAllocated, totalCommitted, maxAmount,
 		), gin.H{
 			"total_allocated":   totalAllocated,
 			"already_committed": totalCommitted,
 			"max_amount":        maxAmount,
 			"attempted":         inv.Amount,
+		}
+	}
+	if inv.NumberOfShares > maxShares {
+		return fmt.Errorf(
+			"Shares exceed the shareholder's total allocation cap. Total allocated %d shares, already committed %d, maximum new shares %d. Tip: pick a specific allocation from the dropdown for a tighter cap.",
+			totalAllocatedShares, totalCommittedShares, maxShares,
+		), gin.H{
+			"total_allocated_shares": totalAllocatedShares,
+			"already_committed":      totalCommittedShares,
+			"max_shares":             maxShares,
+			"attempted":              inv.NumberOfShares,
 		}
 	}
 	return nil, nil
@@ -352,6 +408,11 @@ func GetShareholderInvestmentSummary(c *gin.Context) {
 		SubscriptionType    string     `json:"subscription_type"`
 		PaidAmount          float64    `json:"paid_amount"`
 		PaidShares          int64      `json:"paid_shares"`
+		// Pending direct investments waiting on approval. The form uses these
+		// to subtract from the cap so double-pending the same allocation can't
+		// sneak past the frontend validator.
+		PendingShares       int64      `json:"pending_shares"`
+		PendingAmount       float64    `json:"pending_amount"`
 		RemainingAmount     float64    `json:"remaining_amount"`
 		PaymentStatus       string     `json:"payment_status"`
 		BlockedShares       int64      `json:"blocked_shares"`        // total (paid + unpaid)
@@ -426,6 +487,18 @@ func GetShareholderInvestmentSummary(c *gin.Context) {
 			Where("allocation_id = ? AND is_released = ?", a.ID, false).
 			Select("COALESCE(SUM(block_shares), 0)").Scan(&totalBlockedOnAlloc)
 
+		// Pending direct investments against this allocation (not yet
+		// approved, but committed). Frontend subtracts these from the cap
+		// so double-pending the same allocation can't slip through.
+		var pendingSharesOnAlloc int64
+		var pendingAmountOnAlloc float64
+		database.DB.Model(&models.Investment{}).
+			Where("allocation_id = ? AND status = 'active' AND approval_status = 'pending' AND payment_method NOT IN ('transfer_in','transfer_out')", a.ID).
+			Select("COALESCE(SUM(number_of_shares), 0)").Scan(&pendingSharesOnAlloc)
+		database.DB.Model(&models.Investment{}).
+			Where("allocation_id = ? AND status = 'active' AND approval_status = 'pending' AND payment_method NOT IN ('transfer_in','transfer_out')", a.ID).
+			Select("COALESCE(SUM(amount), 0)").Scan(&pendingAmountOnAlloc)
+
 		allocDetails = append(allocDetails, AllocDetail{
 			ID:                  a.ID,
 			AllocationNo:        a.AllocationNo,
@@ -438,6 +511,8 @@ func GetShareholderInvestmentSummary(c *gin.Context) {
 			SubscriptionType:    subType,
 			PaidAmount:          paid,
 			PaidShares:          paidShares,
+			PendingShares:       pendingSharesOnAlloc,
+			PendingAmount:       pendingAmountOnAlloc,
 			RemainingAmount:     remainingAmt,
 			PaymentStatus:       ps,
 			BlockedShares:       totalBlockedOnAlloc,

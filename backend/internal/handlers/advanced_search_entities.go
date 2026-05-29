@@ -269,6 +269,13 @@ var dividendFieldType = map[string]string{
 	"approval_status":     "enum",
 	"collection_date":     "date",
 	"created_at":          "date",
+	// Joined shareholder columns — resolved against the shareholders table
+	// when a JOIN is added below. Lets the operator filter dividends by the
+	// shareholder's name directly.
+	"shareholders.first_name":  "string",
+	"shareholders.middle_name": "string",
+	"shareholders.last_name":   "string",
+	"shareholders.account_no":  "string",
 }
 
 func SearchDividendsAdvanced(c *gin.Context) {
@@ -279,11 +286,23 @@ func SearchDividendsAdvanced(c *gin.Context) {
 	}
 	offset := NormalizePaging(&input)
 	query := database.DB.Model(&models.Dividend{}).Preload("Shareholder")
+	// Only join the shareholders table when a name/account filter is present.
+	// Scope the SELECT to dividends.* so the joined columns don't bleed into
+	// the Dividend scan, and disambiguate the id ORDER BY.
+	joined := advFiltersReference(input.Filters, "shareholders.")
+	if joined {
+		query = query.Joins("JOIN shareholders ON shareholders.id = dividends.shareholder_id").
+			Select("dividends.*")
+	}
 	query = ApplyAdvancedFilters(query, input.Filters, dividendFieldType)
 
 	var total int64
 	query.Count(&total)
 	var rows []models.Dividend
-	query.Offset(offset).Limit(input.PageSize).Order("id DESC").Find(&rows)
+	order := "id DESC"
+	if joined {
+		order = "dividends.id DESC"
+	}
+	query.Offset(offset).Limit(input.PageSize).Order(order).Find(&rows)
 	c.JSON(http.StatusOK, gin.H{"data": rows, "total": total, "page": input.Page, "page_size": input.PageSize})
 }

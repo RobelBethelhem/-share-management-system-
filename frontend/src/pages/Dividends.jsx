@@ -25,6 +25,10 @@ import AdvancedSearchPanel from '../components/AdvancedSearchPanel';
 const DIVIDEND_FIELDS = [
   { key: 'id',                  label: 'Dividend ID',     type: 'int' },
   { key: 'shareholder_id',      label: 'Shareholder ID',  type: 'int' },
+  { key: 'shareholders.first_name',  label: 'First Name',      type: 'string' },
+  { key: 'shareholders.middle_name', label: 'Middle Name',     type: 'string' },
+  { key: 'shareholders.last_name',   label: 'Last Name',       type: 'string' },
+  { key: 'shareholders.account_no',  label: 'Account No',      type: 'string' },
   { key: 'fiscal_year',         label: 'Fiscal Year',     type: 'string' },
   { key: 'weighted_avg_shares', label: 'W.Avg Shares',    type: 'number' },
   { key: 'gross_dividend',      label: 'Gross Dividend',  type: 'number' },

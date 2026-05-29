@@ -774,8 +774,19 @@ func computeTransferFees(numberOfShares int64, pricePerShare float64, fromAlloca
 	out.CapitalGainTax = out.CapitalGain * capitalGainRate
 	out.CapitalGainTaxRate = capitalGainRate * 100
 
-	// Service fee with floor + cap
-	sf := out.TransferValue * serviceFeeRate
+	// Service fee with floor + cap.
+	// Base is shares × COMPANY PAR (not the selling price). The service fee
+	// is a registry/processing charge on the nominal value of the shares
+	// being moved, independent of the price the parties agreed. So 200 shares
+	// at company par 1,000 → base 200,000 → 1% → 2,000 ETB, regardless of
+	// whether they sold at 1,200 or 800 per share.
+	serviceFeeBase := float64(numberOfShares) * companyPar
+	if companyPar <= 0 {
+		// No company par configured — fall back to transfer value so the fee
+		// isn't silently zero.
+		serviceFeeBase = out.TransferValue
+	}
+	sf := serviceFeeBase * serviceFeeRate
 	if numberOfShares < lowSharesThreshold && sf < serviceFeeMin {
 		sf = serviceFeeMin
 		out.ServiceFeeFloorApplied = true

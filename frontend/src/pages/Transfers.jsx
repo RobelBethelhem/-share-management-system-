@@ -13,7 +13,7 @@ import {
   getShareholders, getShareholderInvestmentSummary, getShareBlocks, getBankCapital,
   searchTransfersAdvanced,
 } from '../services/api';
-import { formatCurrency, transferTypes } from '../utils/format';
+import { formatCurrency, formatNumber, transferTypes } from '../utils/format';
 import AdvancedSearchPanel from '../components/AdvancedSearchPanel';
 
 const TRF_FIELDS = [
@@ -1082,11 +1082,14 @@ export default function Transfers() {
                 </Col>
                 <Col span={8}>
                   <Text type="secondary" style={{ fontSize: 11 }}>
-                    SERVICE FEE ({fees.service_fee_rate}%)
+                    SERVICE FEE ({fees.service_fee_rate}% of par value)
                     {fees.service_fee_floor_applied && <Tag color="orange" style={{ marginLeft: 4, fontSize: 10 }}>min applied</Tag>}
                     {fees.service_fee_cap_applied && <Tag color="orange" style={{ marginLeft: 4, fontSize: 10 }}>capped</Tag>}
                   </Text>
                   <div><Text strong>{formatCurrency(fees.service_fee)}</Text></div>
+                  <Text type="secondary" style={{ fontSize: 10 }}>
+                    on {formatNumber(form.getFieldValue('number_of_shares') || 0)} × company par
+                  </Text>
                 </Col>
                 <Col span={8} style={{ marginTop: 8 }}>
                   <Text type="secondary" style={{ fontSize: 11 }}>

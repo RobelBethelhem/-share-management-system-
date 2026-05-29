@@ -134,7 +134,9 @@ func AllocateFromSubscriptions(c *gin.Context) {
 			AllocatedAmount: sub.ShareAmount,
 			AllocationDate:  &now,
 			Status:          "allocated",
-			ApprovalStatus:  "pending",
+			// Allocations derive from already-approved subscriptions, so they
+			// are approved at creation — no separate authorization step.
+			ApprovalStatus:  "approved",
 		}
 		database.DB.Create(&alloc)
 		count++

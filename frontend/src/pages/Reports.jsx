@@ -324,9 +324,13 @@ export default function Reports() {
     const exportAllocations = filterApproved(statement.allocations);
     const exportTransfers = filterApproved(statement.transfers);
     // Summary sheet. Total Shares = allocated holding (paid + unpaid) so it
-    // reconciles with the Paid/Unpaid rows.
-    const hasAllocs = (statement.allocations?.length || 0) > 0;
-    const holding = hasAllocs ? (statement.total_allocated_shares ?? 0) : (statement.total_shares ?? 0);
+    // reconciles with the Paid/Unpaid rows. Computed from the allocations
+    // array so it doesn't depend on backend rollup fields.
+    const exHasAllocs = (statement.allocations?.length || 0) > 0;
+    const exAllocs = statement.allocations || [];
+    const exHolding = exHasAllocs
+      ? exAllocs.reduce((s, a) => s + (a.allocated_shares || 0), 0)
+      : (statement.total_shares ?? 0);
     const summaryData = [
       ['ZEMEN BANK S.C. - Shareholder Statement'],
       [],
@@ -334,12 +338,12 @@ export default function Reports() {
       ['Name', `${sh?.first_name} ${sh?.middle_name || ''} ${sh?.last_name}`],
       ['Type', sh?.shareholder_type],
       ['Phone', sh?.phone],
-      ['Total Shares (holding)', holding],
+      ['Total Shares (holding)', exHolding],
       ['Total Invested', statement.total_invested],
-      ...(hasAllocs ? [
-        ['Paid Shares', statement.total_paid_shares ?? 0],
-        ['Unpaid Shares', statement.total_unpaid_shares ?? 0],
-        ['Total Blocked', statement.total_blocked_shares ?? 0],
+      ...(exHasAllocs ? [
+        ['Paid Shares', exAllocs.reduce((s, a) => s + (a.paid_shares || 0), 0)],
+        ['Unpaid Shares', exAllocs.reduce((s, a) => s + (a.unpaid_shares || 0), 0)],
+        ['Total Blocked', exAllocs.reduce((s, a) => s + (a.blocked_shares || 0), 0)],
       ] : []),
     ];
     const ws1 = XLSX.utils.aoa_to_sheet(summaryData);
@@ -1534,16 +1538,18 @@ export default function Reports() {
                     gap: '14px 24px',
                   }}>
                     {(() => {
-                      const hasAllocs = statement.allocations?.length > 0;
-                      // Holding = total allocated (paid + unpaid). Reconciles
-                      // with the Paid/Unpaid rows below. Falls back to the
-                      // investment-sum only when there are no allocations yet.
+                      // Compute from the allocations array (always present in
+                      // the payload) so the box is correct regardless of
+                      // backend rollup-field availability. Holding = total
+                      // allocated = paid + unpaid, so the three reconcile.
+                      const allocs = statement.allocations || [];
+                      const hasAllocs = allocs.length > 0;
                       const holding = hasAllocs
-                        ? (statement.total_allocated_shares ?? 0)
+                        ? allocs.reduce((s, a) => s + (a.allocated_shares || 0), 0)
                         : (statement.total_shares ?? 0);
-                      const tp = statement.total_paid_shares ?? 0;
-                      const tu = statement.total_unpaid_shares ?? 0;
-                      const tb = statement.total_blocked_shares ?? 0;
+                      const tp = allocs.reduce((s, a) => s + (a.paid_shares || 0), 0);
+                      const tu = allocs.reduce((s, a) => s + (a.unpaid_shares || 0), 0);
+                      const tb = allocs.reduce((s, a) => s + (a.blocked_shares || 0), 0);
                       return [
                         ['Account No', statement.shareholder?.account_no || '—'],
                         ['Name', `${statement.shareholder?.first_name || ''} ${statement.shareholder?.middle_name || ''} ${statement.shareholder?.last_name || ''}`.replace(/\s+/g, ' ').trim()],

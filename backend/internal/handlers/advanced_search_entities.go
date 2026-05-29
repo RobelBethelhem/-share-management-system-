@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"net/http"
+	"strings"
 
 	"share-management-system/internal/database"
 	"share-management-system/internal/models"
@@ -269,9 +270,10 @@ var dividendFieldType = map[string]string{
 	"approval_status":     "enum",
 	"collection_date":     "date",
 	"created_at":          "date",
-	// Joined shareholder columns — resolved against the shareholders table
-	// when a JOIN is added below. Lets the operator filter dividends by the
-	// shareholder's name directly.
+	// Shareholder name / account fields. These don't live on the dividends
+	// table — they're resolved to a set of shareholder IDs first (see
+	// SearchDividendsAdvanced) and applied as shareholder_id IN (...). The
+	// "shareholders." prefix keys map to the plain shareholders columns.
 	"shareholders.first_name":  "string",
 	"shareholders.middle_name": "string",
 	"shareholders.last_name":   "string",
@@ -285,24 +287,69 @@ func SearchDividendsAdvanced(c *gin.Context) {
 		return
 	}
 	offset := NormalizePaging(&input)
-	query := database.DB.Model(&models.Dividend{}).Preload("Shareholder")
-	// Only join the shareholders table when a name/account filter is present.
-	// Scope the SELECT to dividends.* so the joined columns don't bleed into
-	// the Dividend scan, and disambiguate the id ORDER BY.
-	joined := advFiltersReference(input.Filters, "shareholders.")
-	if joined {
-		query = query.Joins("JOIN shareholders ON shareholders.id = dividends.shareholder_id").
-			Select("dividends.*")
+
+	// Split filters: shareholder.* ones are resolved to a set of shareholder
+	// IDs via a separate query (no fragile JOIN), the rest apply directly to
+	// the dividends table. This keeps the main query on the same clean
+	// Count/Find pattern every other search uses.
+	var shFilters []AdvFilter
+	var divFilters []AdvFilter
+	for _, f := range input.Filters {
+		if strings.HasPrefix(f.Field, "shareholders.") {
+			shFilters = append(shFilters, AdvFilter{
+				Field:  strings.TrimPrefix(f.Field, "shareholders."),
+				Op:     f.Op,
+				Value:  f.Value,
+				Value2: f.Value2,
+			})
+		} else {
+			divFilters = append(divFilters, f)
+		}
 	}
-	query = ApplyAdvancedFilters(query, input.Filters, dividendFieldType)
+
+	query := database.DB.Model(&models.Dividend{}).
+		Preload("Shareholder").Preload("DividendSetting")
+
+	if len(shFilters) > 0 {
+		shQuery := database.DB.Model(&models.Shareholder{})
+		shQuery = ApplyAdvancedFilters(shQuery, shFilters, shareholderFieldType)
+		var ids []uint
+		shQuery.Pluck("id", &ids)
+		if len(ids) == 0 {
+			// No shareholder matched the name filter → no dividends.
+			c.JSON(http.StatusOK, gin.H{"data": []any{}, "total": 0, "page": input.Page, "page_size": input.PageSize})
+			return
+		}
+		query = query.Where("shareholder_id IN ?", ids)
+	}
+
+	query = ApplyAdvancedFilters(query, divFilters, dividendFieldType)
 
 	var total int64
 	query.Count(&total)
 	var rows []models.Dividend
-	order := "id DESC"
-	if joined {
-		order = "dividends.id DESC"
+	query.Offset(offset).Limit(input.PageSize).Order("id DESC").Find(&rows)
+
+	// Augment with live recomputed values, exactly like GetDividends, so the
+	// UI's stored-vs-live columns render correctly instead of showing 0.
+	type augmented struct {
+		models.Dividend
+		LiveWeightedShares float64 `json:"live_weighted_shares"`
+		LiveGrossDividend  float64 `json:"live_gross_dividend"`
+		LiveTaxAmount      float64 `json:"live_tax_amount"`
+		LiveNetDividend    float64 `json:"live_net_dividend"`
 	}
-	query.Offset(offset).Limit(input.PageSize).Order(order).Find(&rows)
-	c.JSON(http.StatusOK, gin.H{"data": rows, "total": total, "page": input.Page, "page_size": input.PageSize})
+	out := make([]augmented, 0, len(rows))
+	for _, d := range rows {
+		live := computeLiveDividend(d, d.DividendSetting)
+		out = append(out, augmented{
+			Dividend:           d,
+			LiveWeightedShares: live.WeightedShares,
+			LiveGrossDividend:  live.Gross,
+			LiveTaxAmount:      live.Tax,
+			LiveNetDividend:    live.Net,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": out, "total": total, "page": input.Page, "page_size": input.PageSize})
 }

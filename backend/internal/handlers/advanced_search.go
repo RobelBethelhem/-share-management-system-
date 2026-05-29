@@ -38,18 +38,6 @@ func quoteField(field string) string {
 	return strings.Join(parts, ".")
 }
 
-// advFiltersReference reports whether any filter targets a field under the
-// given table prefix (e.g. "shareholders."). Handlers use this to decide
-// whether to add a JOIN before applying the filters.
-func advFiltersReference(filters []AdvFilter, prefix string) bool {
-	for _, f := range filters {
-		if strings.HasPrefix(f.Field, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
 // ApplyAdvancedFilters AND-combines every filter onto the query. Each filter's
 // field is looked up in fieldTypes (the per-entity whitelist) — unknown fields
 // are silently dropped, which is the SQL-injection guard for the field name.

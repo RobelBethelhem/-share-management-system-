@@ -122,16 +122,34 @@ func ShareholderStatement(c *gin.Context) {
 		Where("shareholder_id = ? AND status = ?", id, "active").
 		Select("COALESCE(SUM(number_of_shares), 0)").Scan(&totalShares)
 
+	// Allocation-based rollups. These reconcile by construction:
+	//   total_allocated = total_paid + total_unpaid.
+	// The statement uses total_allocated as the shareholder's holding
+	// ("Total Shares"), with paid / unpaid as its payment-status breakdown.
+	// (total_shares above is the investment-sum = paid-in shares, kept for
+	// backward compatibility and any consumer that wants the money-in view.)
+	var totalAllocated, totalPaidShares, totalUnpaidShares, totalBlockedShares int64
+	for _, a := range allocSummaries {
+		totalAllocated += a.AllocatedShares
+		totalPaidShares += a.PaidShares
+		totalUnpaidShares += a.UnpaidShares
+		totalBlockedShares += a.BlockedShares
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"shareholder":    shareholder,
-		"investments":    investments,
-		"subscriptions":  subscriptions,
-		"dividends":      dividends,
-		"transfers":      transfers,
-		"blocks":         blocks,
-		"allocations":    allocSummaries,
-		"total_invested": totalInvested,
-		"total_shares":   totalShares,
+		"shareholder":           shareholder,
+		"investments":           investments,
+		"subscriptions":         subscriptions,
+		"dividends":             dividends,
+		"transfers":             transfers,
+		"blocks":                blocks,
+		"allocations":           allocSummaries,
+		"total_invested":        totalInvested,
+		"total_shares":          totalShares,
+		"total_allocated_shares": totalAllocated,
+		"total_paid_shares":     totalPaidShares,
+		"total_unpaid_shares":   totalUnpaidShares,
+		"total_blocked_shares":  totalBlockedShares,
 	})
 }
 

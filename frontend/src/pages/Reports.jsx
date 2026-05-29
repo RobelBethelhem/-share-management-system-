@@ -323,7 +323,10 @@ export default function Reports() {
     const exportSubscriptions = filterApproved(statement.subscriptions);
     const exportAllocations = filterApproved(statement.allocations);
     const exportTransfers = filterApproved(statement.transfers);
-    // Summary sheet
+    // Summary sheet. Total Shares = allocated holding (paid + unpaid) so it
+    // reconciles with the Paid/Unpaid rows.
+    const hasAllocs = (statement.allocations?.length || 0) > 0;
+    const holding = hasAllocs ? (statement.total_allocated_shares ?? 0) : (statement.total_shares ?? 0);
     const summaryData = [
       ['ZEMEN BANK S.C. - Shareholder Statement'],
       [],
@@ -331,8 +334,13 @@ export default function Reports() {
       ['Name', `${sh?.first_name} ${sh?.middle_name || ''} ${sh?.last_name}`],
       ['Type', sh?.shareholder_type],
       ['Phone', sh?.phone],
-      ['Total Shares', statement.total_shares],
+      ['Total Shares (holding)', holding],
       ['Total Invested', statement.total_invested],
+      ...(hasAllocs ? [
+        ['Paid Shares', statement.total_paid_shares ?? 0],
+        ['Unpaid Shares', statement.total_unpaid_shares ?? 0],
+        ['Total Blocked', statement.total_blocked_shares ?? 0],
+      ] : []),
     ];
     const ws1 = XLSX.utils.aoa_to_sheet(summaryData);
     XLSX.utils.book_append_sheet(wb, ws1, 'Summary');
@@ -534,16 +542,18 @@ export default function Reports() {
           <div class="item"><div class="label">Account No</div><div class="value">${sh?.account_no || '-'}</div></div>
           <div class="item"><div class="label">Name</div><div class="value">${sh?.first_name} ${sh?.middle_name || ''} ${sh?.last_name}</div></div>
           <div class="item"><div class="label">Type</div><div class="value">${sh?.shareholder_type || '-'}</div></div>
-          <div class="item"><div class="label">Total Shares</div><div class="value">${formatNumber(statement.total_shares)}</div></div>
-          <div class="item"><div class="label">Total Invested</div><div class="value">${formatCurrency(statement.total_invested)}</div></div>
           ${printAllocations.length > 0 ? (() => {
+            const holding = printAllocations.reduce((s, a) => s + (a.allocated_shares || 0), 0);
             const tp = printAllocations.reduce((s, a) => s + (a.paid_shares || 0), 0);
             const tu = printAllocations.reduce((s, a) => s + (a.unpaid_shares || 0), 0);
-            const tb = printAllocations.reduce((s, a) => s + (a.paid_blocked || 0) + (a.unpaid_blocked || 0), 0);
-            return `<div class="item"><div class="label">Paid Shares</div><div class="value">${formatNumber(tp)}</div></div>
+            const tb = printAllocations.reduce((s, a) => s + (a.blocked_shares || 0), 0);
+            return `<div class="item"><div class="label">Total Shares (holding)</div><div class="value">${formatNumber(holding)}</div></div>
+            <div class="item"><div class="label">Total Invested</div><div class="value">${formatCurrency(statement.total_invested)}</div></div>
+            <div class="item"><div class="label">Paid Shares</div><div class="value">${formatNumber(tp)}</div></div>
             <div class="item"><div class="label">Unpaid Shares</div><div class="value">${formatNumber(tu)}</div></div>
             <div class="item"><div class="label">Total Blocked</div><div class="value">${formatNumber(tb)}</div></div>`;
-          })() : ''}
+          })() : `<div class="item"><div class="label">Total Shares</div><div class="value">${formatNumber(statement.total_shares)}</div></div>
+            <div class="item"><div class="label">Total Invested</div><div class="value">${formatCurrency(statement.total_invested)}</div></div>`}
           ${!includeRejected ? '<div class="item" style="color:#999;font-size:10px;"><em>Approved entries only</em></div>' : '<div class="item" style="color:#cf1322;font-size:10px;"><em>Including rejected</em></div>'}
         </div>
       `);
@@ -1523,26 +1533,33 @@ export default function Reports() {
                     gridTemplateColumns: 'repeat(4, 1fr)',
                     gap: '14px 24px',
                   }}>
-                    {[
-                      ['Account No', statement.shareholder?.account_no || '—'],
-                      ['Name', `${statement.shareholder?.first_name || ''} ${statement.shareholder?.middle_name || ''} ${statement.shareholder?.last_name || ''}`.replace(/\s+/g, ' ').trim()],
-                      ['Type', statement.shareholder?.shareholder_type || '—'],
-                      ['Total Shares', formatNumber(statement.total_shares)],
-                      ['Total Invested', formatCurrency(statement.total_invested)],
-                      ['TIN', statement.shareholder?.tin || '—'],
-                      ['Phone', statement.shareholder?.phone || '—'],
-                      ['Status', (statement.shareholder?.status || '—').toUpperCase()],
-                      ...(statement.allocations?.length > 0 ? (() => {
-                        const tp = statement.allocations.reduce((s, a) => s + (a.paid_shares || 0), 0);
-                        const tu = statement.allocations.reduce((s, a) => s + (a.unpaid_shares || 0), 0);
-                        const tb = statement.allocations.reduce((s, a) => s + (a.paid_blocked || 0) + (a.unpaid_blocked || 0), 0);
-                        return [
+                    {(() => {
+                      const hasAllocs = statement.allocations?.length > 0;
+                      // Holding = total allocated (paid + unpaid). Reconciles
+                      // with the Paid/Unpaid rows below. Falls back to the
+                      // investment-sum only when there are no allocations yet.
+                      const holding = hasAllocs
+                        ? (statement.total_allocated_shares ?? 0)
+                        : (statement.total_shares ?? 0);
+                      const tp = statement.total_paid_shares ?? 0;
+                      const tu = statement.total_unpaid_shares ?? 0;
+                      const tb = statement.total_blocked_shares ?? 0;
+                      return [
+                        ['Account No', statement.shareholder?.account_no || '—'],
+                        ['Name', `${statement.shareholder?.first_name || ''} ${statement.shareholder?.middle_name || ''} ${statement.shareholder?.last_name || ''}`.replace(/\s+/g, ' ').trim()],
+                        ['Type', statement.shareholder?.shareholder_type || '—'],
+                        ['Total Shares (holding)', formatNumber(holding)],
+                        ['Total Invested', formatCurrency(statement.total_invested)],
+                        ['TIN', statement.shareholder?.tin || '—'],
+                        ['Phone', statement.shareholder?.phone || '—'],
+                        ['Status', (statement.shareholder?.status || '—').toUpperCase()],
+                        ...(hasAllocs ? [
                           ['Paid Shares', formatNumber(tp)],
                           ['Unpaid Shares', formatNumber(tu)],
                           ['Total Blocked', formatNumber(tb)],
-                        ];
-                      })() : []),
-                    ].map(([label, value]) => (
+                        ] : []),
+                      ];
+                    })().map(([label, value]) => (
                       <div key={label}>
                         <div style={{ fontSize: 11, color: '#666', textTransform: 'uppercase', letterSpacing: 0.5 }}>{label}</div>
                         <div style={{ fontSize: 14, fontWeight: 700, color: '#1a3a5c', marginTop: 2 }}>{value}</div>

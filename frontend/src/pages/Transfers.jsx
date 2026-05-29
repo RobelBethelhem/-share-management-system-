@@ -895,20 +895,54 @@ export default function Transfers() {
                                 {(mode === 'paid_only' || mode === 'both') && (
                                   <Form.Item name={[field.name, 'paid_shares_to_transfer']}
                                     label={`Paid shares (max ${availPaid.toLocaleString()}${paidBlocked > 0 ? ` = ${paid} − ${paidBlocked} blocked` : totalBlockedOnAlloc > 0 ? ` = capped by ${totalBlockedOnAlloc} blocked` : ''})`}
-                                    rules={[{ required: true, message: 'Required' }, { type: 'number', min: 1, max: availPaid, message: `Must be 1–${availPaid}` }]}
+                                    rules={[
+                                      { required: true, message: 'Required' },
+                                      {
+                                        validator: (_, v) => {
+                                          if (v == null || v === '') return Promise.resolve();
+                                          if (v < 1) return Promise.reject(new Error('Must be at least 1'));
+                                          if (v > availPaid) return Promise.reject(new Error(`Cannot exceed available paid shares (${availPaid.toLocaleString()})`));
+                                          return Promise.resolve();
+                                        },
+                                      },
+                                    ]}
                                     style={{ marginBottom: 8 }}>
                                     <InputNumber style={{ width: '100%' }} min={1} max={availPaid} precision={0}
-                                      disabled={mode === 'full'} onChange={syncTotal} />
+                                      disabled={mode === 'full'}
+                                      onChange={(val) => {
+                                        // Hard-clamp: never let the field hold a value above the
+                                        // available paid shares — prevents garbage at the source.
+                                        if (val != null && Number(val) > availPaid) {
+                                          form.setFieldValue(['lines', field.name, 'paid_shares_to_transfer'], availPaid);
+                                        }
+                                        syncTotal();
+                                      }} />
                                   </Form.Item>
                                 )}
 
                                 {(mode === 'unpaid_only' || mode === 'both') && (
                                   <Form.Item name={[field.name, 'unpaid_shares_to_transfer']}
                                     label={`Unpaid shares (max ${availUnpaid.toLocaleString()}${unpaidBlocked > 0 ? ` = ${unpaid} − ${unpaidBlocked} blocked` : ''})`}
-                                    rules={[{ required: true, message: 'Required' }, { type: 'number', min: 1, max: availUnpaid, message: `Must be 1–${availUnpaid}` }]}
+                                    rules={[
+                                      { required: true, message: 'Required' },
+                                      {
+                                        validator: (_, v) => {
+                                          if (v == null || v === '') return Promise.resolve();
+                                          if (v < 1) return Promise.reject(new Error('Must be at least 1'));
+                                          if (v > availUnpaid) return Promise.reject(new Error(`Cannot exceed available unpaid shares (${availUnpaid.toLocaleString()})`));
+                                          return Promise.resolve();
+                                        },
+                                      },
+                                    ]}
                                     style={{ marginBottom: 8 }}>
                                     <InputNumber style={{ width: '100%' }} min={1} max={availUnpaid} precision={0}
-                                      disabled={mode === 'full'} onChange={syncTotal} />
+                                      disabled={mode === 'full'}
+                                      onChange={(val) => {
+                                        if (val != null && Number(val) > availUnpaid) {
+                                          form.setFieldValue(['lines', field.name, 'unpaid_shares_to_transfer'], availUnpaid);
+                                        }
+                                        syncTotal();
+                                      }} />
                                   </Form.Item>
                                 )}
                               </>

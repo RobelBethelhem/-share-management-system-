@@ -184,6 +184,23 @@ export default function Transfers() {
     handleCalcFees();
   };
 
+  // Earliest date the Dividend-From-Share-Transfer date may take: the LATEST
+  // acquisition date across the currently-selected source allocations. The
+  // dividend cutoff can't predate when the shares entered the source
+  // allocation (else the dividend breakdown goes negative). Returns a dayjs
+  // or null when no allocation with an acquisition date is selected.
+  const dividendFromFloor = () => {
+    const selected = Object.values(lineAllocs).filter(Boolean);
+    let floor = null;
+    for (const a of selected) {
+      const acq = a.acquisition_date || a.allocation_date;
+      if (!acq) continue;
+      const d = dayjs(acq).startOf('day');
+      if (!floor || d.isAfter(floor)) floor = d;
+    }
+    return floor;
+  };
+
   const handleTransferorChange = async (shareholderId) => {
     setTransferorSummary(null);
     setTransferorBlocks([]);
@@ -1043,9 +1060,32 @@ export default function Transfers() {
               <Form.Item
                 name="agreed_dividend_date"
                 label="Dividend From Share Transfer Date"
-                tooltip="Dividends up to this date are for the Transferor; from this date onward are for the Transferee. Leave blank to use the transfer approval date."
+                tooltip="Dividends up to this date are for the Transferor; from this date onward are for the Transferee. Leave blank to use the transfer approval date. Cannot be earlier than the source allocation's acquisition date."
+                extra={(() => {
+                  const floor = dividendFromFloor();
+                  return floor
+                    ? <Text type="secondary" style={{ fontSize: 11 }}>Must be on or after {floor.format('YYYY-MM-DD')} (source allocation acquired)</Text>
+                    : null;
+                })()}
+                rules={[{
+                  validator: (_, value) => {
+                    if (!value) return Promise.resolve();
+                    const floor = dividendFromFloor();
+                    if (floor && value.startOf('day').isBefore(floor)) {
+                      return Promise.reject(new Error(`Cannot be earlier than ${floor.format('YYYY-MM-DD')} — the source allocation acquired its shares then.`));
+                    }
+                    return Promise.resolve();
+                  },
+                }]}
               >
-                <DatePicker style={{ width: '100%' }} format="YYYY-MM-DD" />
+                <DatePicker
+                  style={{ width: '100%' }}
+                  format="YYYY-MM-DD"
+                  disabledDate={(current) => {
+                    const floor = dividendFromFloor();
+                    return floor && current && current.startOf('day').isBefore(floor);
+                  }}
+                />
               </Form.Item>
             </Col>
           </Row>

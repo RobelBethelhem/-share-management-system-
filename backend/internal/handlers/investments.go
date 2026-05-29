@@ -221,6 +221,33 @@ func computeAllocPaidShares(shareholderID uint, allocID uint) int64 {
 	return 0
 }
 
+// allocationAcquisitionDate returns the date on/after which the source
+// allocation's shares may start earning dividend for the holder — i.e. the
+// floor for any transfer's AgreedDividendDate drawn from this allocation.
+//
+// It is the LATER of:
+//   - the allocation's AllocationDate (for a transfer-received allocation
+//     this is the incoming transfer's agreed date), and
+//   - the earliest payment_date among the allocation's positive-share
+//     approved investments (original purchase / transfer_in / reinvest).
+//
+// Returns nil only when neither is known. Backdating a transfer's
+// dividend-from date before this would credit the new owner (and debit the
+// old) for days the shares didn't yet belong to the source allocation —
+// the exact mismatch that produced negative cohort rows.
+func allocationAcquisitionDate(alloc models.Allocation) *time.Time {
+	var earliest *time.Time
+	database.DB.Model(&models.Investment{}).
+		Where("allocation_id = ? AND status = 'active' AND approval_status = 'approved' AND number_of_shares > 0", alloc.ID).
+		Select("MIN(payment_date)").Scan(&earliest)
+
+	acq := alloc.AllocationDate
+	if earliest != nil && (acq == nil || earliest.After(*acq)) {
+		acq = earliest
+	}
+	return acq
+}
+
 func GetInvestments(c *gin.Context) {
 	shareholderID := c.Query("shareholder_id")
 	approvalStatus := c.Query("approval_status")
@@ -403,6 +430,7 @@ func GetShareholderInvestmentSummary(c *gin.Context) {
 		AllocatedShares     int64      `json:"allocated_shares"`
 		AllocatedAmount     float64    `json:"allocated_amount"`
 		AllocationDate      *time.Time `json:"allocation_date"`
+		AcquisitionDate     *time.Time `json:"acquisition_date"` // dividend-from floor for transfers from this allocation
 		Status              string     `json:"status"`
 		ApprovalStatus      string     `json:"approval_status"`
 		SubscriptionType    string     `json:"subscription_type"`
@@ -506,6 +534,7 @@ func GetShareholderInvestmentSummary(c *gin.Context) {
 			AllocatedShares:     a.AllocatedShares,
 			AllocatedAmount:     a.AllocatedAmount,
 			AllocationDate:      a.AllocationDate,
+			AcquisitionDate:     allocationAcquisitionDate(a),
 			Status:              a.Status,
 			ApprovalStatus:      a.ApprovalStatus,
 			SubscriptionType:    subType,

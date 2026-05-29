@@ -274,6 +274,47 @@ func CreateTransfer(c *gin.Context) {
 			return
 		}
 
+		// Dividend-from-date floor. The AgreedDividendDate cannot be earlier
+		// than the acquisition date of any source allocation — backdating it
+		// would credit the new owner (and debit the old) for days the shares
+		// hadn't yet entered the source allocation, producing negative cohort
+		// rows in the dividend breakdown. Floor = the LATEST acquisition date
+		// across all source allocations.
+		if input.AgreedDividendDate != nil {
+			var floor *time.Time
+			var floorAllocNo string
+			for _, line := range input.Lines {
+				var alloc models.Allocation
+				if err := database.DB.First(&alloc, line.FromAllocationID).Error; err != nil {
+					continue
+				}
+				acq := allocationAcquisitionDate(alloc)
+				if acq != nil && (floor == nil || acq.After(*floor)) {
+					floor = acq
+					floorAllocNo = alloc.AllocationNo
+				}
+			}
+			if floor != nil {
+				// Compare date-only (ignore time component).
+				fy, fm, fd := floor.Date()
+				floorDay := time.Date(fy, fm, fd, 0, 0, 0, 0, floor.Location())
+				ay, am, ad := input.AgreedDividendDate.Date()
+				agreedDay := time.Date(ay, am, ad, 0, 0, 0, 0, input.AgreedDividendDate.Location())
+				if agreedDay.Before(floorDay) {
+					c.JSON(http.StatusBadRequest, gin.H{
+						"error": fmt.Sprintf(
+							"Dividend From Share Transfer Date (%s) cannot be earlier than when the source allocation %s acquired its shares (%s). Pick a date on or after %s.",
+							agreedDay.Format("2006-01-02"), floorAllocNo,
+							floorDay.Format("2006-01-02"), floorDay.Format("2006-01-02"),
+						),
+						"min_dividend_date": floorDay.Format("2006-01-02"),
+						"allocation_no":     floorAllocNo,
+					})
+					return
+				}
+			}
+		}
+
 		// Validate ToAllocationID belongs to transferee
 		if input.ToAllocationID != nil {
 			var dest models.Allocation

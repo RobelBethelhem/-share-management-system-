@@ -385,12 +385,18 @@ export default function Reports() {
 
     // Transfers sheet
     if (exportTransfers.length) {
-      const trHeaders = ['Batch', 'Date', 'Total Shares', 'Paid', 'Unpaid', 'Amount', 'Type', 'Status', 'From Allocation(s)'];
+      const exShId = sh?.id;
+      const trHeaders = ['Batch', 'Date', 'Direction', 'Counterparty', 'Counterparty Sh.ID', 'Counterparty Account', 'Total Shares', 'Paid', 'Unpaid', 'Amount', 'Type', 'Status', 'From Allocation(s)'];
       const trRows = exportTransfers.map(t => {
         const paidTot = (t.lines || []).reduce((s, l) => s + (l.paid_shares_to_transfer || 0), 0);
         const unpaidTot = (t.lines || []).reduce((s, l) => s + (l.unpaid_shares_to_transfer || 0), 0);
         const fromAllocs = (t.lines || []).map(l => l.from_allocation?.allocation_no || l.from_allocation_id || '').filter(Boolean).join(', ');
+        const out = t.transferor_id === exShId;
+        const cp = out ? t.transferee : t.transferor;
+        const cpId = out ? t.transferee_id : t.transferor_id;
+        const cpName = cp ? `${cp.first_name || ''} ${cp.middle_name || ''} ${cp.last_name || ''}`.replace(/\s+/g, ' ').trim() : '';
         return [t.batch_no, t.transfer_date ? dayjs(t.transfer_date).format('YYYY-MM-DD') : '',
+          out ? 'OUT' : 'IN', cpName, cpId ?? '', cp?.account_no ?? '',
           t.number_of_shares, paidTot, unpaidTot, t.transfer_amount, t.transfer_type, t.status, fromAllocs];
       });
       const ws4 = XLSX.utils.aoa_to_sheet([trHeaders, ...trRows]);
@@ -591,12 +597,19 @@ export default function Reports() {
 
       // Transfers table
       if (printTransfers.length) {
-        printWindow.document.write(`<div class="section-title">Transfers (${printTransfers.length})</div><table><tr><th>Batch</th><th>Date</th><th>Total Shares</th><th>Paid</th><th>Unpaid</th><th>Amount</th><th>Type</th><th>Status</th><th>From Allocation(s)</th></tr>`);
+        const pShId = sh?.id;
+        printWindow.document.write(`<div class="section-title">Transfers (${printTransfers.length})</div><table><tr><th>Batch</th><th>Date</th><th>Direction</th><th>Counterparty (Sh.ID)</th><th>Total Shares</th><th>Paid</th><th>Unpaid</th><th>Amount</th><th>Type</th><th>Status</th><th>From Allocation(s)</th></tr>`);
         printTransfers.forEach(t => {
           const paidTot = (t.lines || []).reduce((s, l) => s + (l.paid_shares_to_transfer || 0), 0);
           const unpaidTot = (t.lines || []).reduce((s, l) => s + (l.unpaid_shares_to_transfer || 0), 0);
           const fromAllocs = (t.lines || []).map(l => l.from_allocation?.allocation_no || '').filter(Boolean).join(', ') || '-';
-          printWindow.document.write(`<tr><td>${t.batch_no}</td><td>${t.transfer_date ? dayjs(t.transfer_date).format('YYYY-MM-DD') : '-'}</td><td>${t.number_of_shares}</td><td>${paidTot}</td><td>${unpaidTot}</td><td>${formatCurrency(t.transfer_amount)}</td><td>${t.transfer_type}</td><td>${t.status}</td><td>${fromAllocs}</td></tr>`);
+          const out = t.transferor_id === pShId;
+          const cp = out ? t.transferee : t.transferor;
+          const cpId = out ? t.transferee_id : t.transferor_id;
+          const cpName = cp ? `${cp.first_name || ''} ${cp.middle_name || ''} ${cp.last_name || ''}`.replace(/\s+/g, ' ').trim() : '—';
+          const dir = out ? 'OUT &#9656;' : '&#9666; IN';
+          const cpCell = `${out ? 'To' : 'From'} ${cpName} (Sh.ID ${cpId ?? '—'}${cp?.account_no ? ', ' + cp.account_no : ''})`;
+          printWindow.document.write(`<tr><td>${t.batch_no}</td><td>${t.transfer_date ? dayjs(t.transfer_date).format('YYYY-MM-DD') : '-'}</td><td>${dir}</td><td>${cpCell}</td><td>${t.number_of_shares}</td><td>${paidTot}</td><td>${unpaidTot}</td><td>${formatCurrency(t.transfer_amount)}</td><td>${t.transfer_type}</td><td>${t.status}</td><td>${fromAllocs}</td></tr>`);
         });
         printWindow.document.write('</table>');
       }
@@ -1696,6 +1709,17 @@ export default function Reports() {
                     const transfers = filterApproved(statement.transfers);
                     if (transfers.length === 0) return null;
                     const rejectedCount = (statement.transfers?.length || 0) - transfers.length;
+                    // Direction + counterparty relative to THIS shareholder.
+                    const shId = statement.shareholder?.id;
+                    const counterpartyOf = (r) => {
+                      const out = r.transferor_id === shId;
+                      const cp = out ? r.transferee : r.transferor;
+                      const cpId = out ? r.transferee_id : r.transferor_id;
+                      const name = cp
+                        ? `${cp.first_name || ''} ${cp.middle_name || ''} ${cp.last_name || ''}`.replace(/\s+/g, ' ').trim()
+                        : '—';
+                      return { out, name, cpId, accountNo: cp?.account_no };
+                    };
                     return (
                     <div style={{ marginBottom: 18 }}>
                       <div style={statementSectionTitleStyle}>
@@ -1730,6 +1754,25 @@ export default function Reports() {
                         columns={[
                           { title: 'Batch', dataIndex: 'batch_no', width: 110 },
                           { title: 'Date', dataIndex: 'transfer_date', width: 100, render: (d) => d ? dayjs(d).format('YYYY-MM-DD') : '-' },
+                          { title: 'Direction', key: 'dir', width: 90,
+                            render: (_, r) => {
+                              const { out } = counterpartyOf(r);
+                              return out
+                                ? <Tag color="red">OUT ▸</Tag>
+                                : <Tag color="green">◂ IN</Tag>;
+                            }},
+                          { title: 'Counterparty', key: 'cp', width: 200,
+                            render: (_, r) => {
+                              const { out, name, cpId, accountNo } = counterpartyOf(r);
+                              return (
+                                <div>
+                                  <div><Text strong>{name}</Text></div>
+                                  <Text type="secondary" style={{ fontSize: 11 }}>
+                                    {out ? 'To' : 'From'} · Sh.ID {cpId ?? '—'}{accountNo ? ` · ${accountNo}` : ''}
+                                  </Text>
+                                </div>
+                              );
+                            }},
                           { title: 'Total Shares', dataIndex: 'number_of_shares', width: 100 },
                           { title: 'Paid', key: 'paid', width: 80,
                             render: (_, r) => {

@@ -783,7 +783,7 @@ export default function Dividends() {
     { title: 'Tax', key: 'tax', render: (_, r) => cellWithLive(r.live_tax_amount, r.tax_amount, v => formatCurrency(v)) },
     { title: 'Net', key: 'net', render: (_, r) => cellWithLive(r.live_net_dividend, r.net_dividend, v => formatCurrency(v)) },
     { title: 'Collected', dataIndex: 'collected_amount', render: (v) => formatCurrency(v) },
-    { title: 'Uncollected', dataIndex: 'uncollected_amount', render: (v) => formatCurrency(v) },
+    { title: 'Uncollected', key: 'uncollected', render: (_, r) => cellWithLive(r.live_uncollected, r.uncollected_amount, v => formatCurrency(v)) },
     {
       title: 'Status', key: 'status', width: 100,
       render: (_, r) => (

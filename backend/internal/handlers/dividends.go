@@ -565,16 +565,26 @@ func GetDividends(c *gin.Context) {
 		LiveGrossDividend  float64 `json:"live_gross_dividend"`
 		LiveTaxAmount      float64 `json:"live_tax_amount"`
 		LiveNetDividend    float64 `json:"live_net_dividend"`
+		LiveUncollected    float64 `json:"live_uncollected"`
 	}
 	out := make([]augmented, 0, len(dividends))
 	for _, d := range dividends {
 		live := computeLiveDividend(d, d.DividendSetting)
+		// Live uncollected = live net − already collected (reinvested is
+		// already removed inside computeLiveDividend's net). Keeps the
+		// Uncollected column consistent with the live Gross/Net columns so
+		// it can never exceed the live gross.
+		liveUncollected := live.Net - d.CollectedAmount
+		if liveUncollected < 0 {
+			liveUncollected = 0
+		}
 		out = append(out, augmented{
 			Dividend:           d,
 			LiveWeightedShares: live.WeightedShares,
 			LiveGrossDividend:  live.Gross,
 			LiveTaxAmount:      live.Tax,
 			LiveNetDividend:    live.Net,
+			LiveUncollected:    liveUncollected,
 		})
 	}
 

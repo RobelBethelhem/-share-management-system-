@@ -338,16 +338,22 @@ func SearchDividendsAdvanced(c *gin.Context) {
 		LiveGrossDividend  float64 `json:"live_gross_dividend"`
 		LiveTaxAmount      float64 `json:"live_tax_amount"`
 		LiveNetDividend    float64 `json:"live_net_dividend"`
+		LiveUncollected    float64 `json:"live_uncollected"`
 	}
 	out := make([]augmented, 0, len(rows))
 	for _, d := range rows {
 		live := computeLiveDividend(d, d.DividendSetting)
+		liveUncollected := live.Net - d.CollectedAmount
+		if liveUncollected < 0 {
+			liveUncollected = 0
+		}
 		out = append(out, augmented{
 			Dividend:           d,
 			LiveWeightedShares: live.WeightedShares,
 			LiveGrossDividend:  live.Gross,
 			LiveTaxAmount:      live.Tax,
 			LiveNetDividend:    live.Net,
+			LiveUncollected:    liveUncollected,
 		})
 	}
 

@@ -173,14 +173,19 @@ export default function Dividends() {
       //   same auditDays and the cohort contributes zero (matches audit).
       const aAdd = auditDays(addDate);
       const aSub = auditDays(subDate);
-      const fyDays = Math.max(0, aAdd - aSub);
-      // Raw ownership length is kept for the "Period" tooltip so the user
-      // can see when the FY clamp shortened the counted period vs the
-      // actual time the shareholder held those shares.
-      const rawDays = Math.max(0, subDate.diff(addDate, 'day'));
+      // SIGNED, no max(0) clamp. fyDays is normally positive (acquired before
+      // it left). It goes NEGATIVE only when the outflow is effective-dated
+      // BEFORE the inflow (the transfer_out's AgreedDividendDate is earlier
+      // than the transfer_in's date). That negative is a real audit
+      // contribution — clamping it to 0 would make the cohort total diverge
+      // from the audit total. Keeping it signed guarantees they reconcile.
+      const fyDays = aAdd - aSub;
+      const inverted = fyDays < 0;
+      // Raw ownership length for display. Signed too, so an inverted lot
+      // reads honestly.
+      const rawDays = subDate.diff(addDate, 'day');
       // "preFY": both endpoints clamped at dY → entirely outside the FY
-      // window. Contributes zero to this dividend and was already accounted
-      // for in the prior FY's processing. Hidden by the table filter.
+      // window. Contributes zero and was processed in the prior FY. Hidden.
       const preFY = aAdd === dY && aSub === dY;
       cohorts.push({
         key: `c-${p.investment_id}-${sub.investment_id}`,
@@ -199,6 +204,7 @@ export default function Dividends() {
         outcomeDate: subDate,
         stayed: false,
         sameDay: rawDays === 0,
+        inverted,
         crossAlloc: p.allocation_id !== sub.allocation_id,
         preFY,
       });
@@ -365,14 +371,18 @@ export default function Dividends() {
         const outcomeLabel = p.stayed
           ? 'Stayed to reference'
           : `Transferred ${p.outcomeDate?.format('YYYY-MM-DD')} (${p.outcomeRef || `#${p.outcomeInvId}`})`;
+        const wCls = p.weighted < 0 ? 'neg' : 'pos';
+        const periodCell = p.inverted
+          ? `${p.startDate.format('YYYY-MM-DD')} (in) · ${p.outcomeDate?.format('YYYY-MM-DD')} (out) — outflow before inflow`
+          : `${p.startDate.format('YYYY-MM-DD')} → ${p.endDate.format('YYYY-MM-DD')}`;
         body += `<tr>
-          <td>${p.startDate.format('YYYY-MM-DD')} → ${p.endDate.format('YYYY-MM-DD')}</td>
+          <td>${periodCell}</td>
           <td class="num pos">${formatNumber(p.shares)}</td>
           <td>${p.sourceAlloc || '—'}</td>
           <td>${sourceLabel} (Inv #${p.sourceInvId})</td>
           <td>${outcomeLabel}</td>
-          <td class="num">${p.days}</td>
-          <td class="num pos">${p.weighted.toFixed(4)}</td>
+          <td class="num ${p.days < 0 ? 'neg' : ''}">${p.days}</td>
+          <td class="num ${wCls}">${p.weighted.toFixed(4)}</td>
           <td>${p.shares} × ${p.days} ÷ ${breakdown.days_in_year || 365}</td>
         </tr>`;
       }
@@ -973,7 +983,12 @@ export default function Dividends() {
               columns={[
                 { title: 'Period (held)', key: 'period', render: (_, p) => (
                   <div>
-                    {p.sameDay && !p.orphan ? (
+                    {p.inverted ? (
+                      <>
+                        <div><Text strong>{p.startDate.format('YYYY-MM-DD')}</Text> (in) · <Text strong>{p.outcomeDate?.format('YYYY-MM-DD')}</Text> (out)</div>
+                        <Text type="danger" style={{ fontSize: 11 }}>outflow dated before inflow · {p.days} d</Text>
+                      </>
+                    ) : p.sameDay && !p.orphan ? (
                       <>
                         <div><Text strong>{p.startDate.format('YYYY-MM-DD')}</Text></div>
                         <Text type="secondary" style={{ fontSize: 11 }}>same-day · 0 days</Text>
@@ -1018,8 +1033,8 @@ export default function Dividends() {
                 }},
                 { title: 'Days (counted)', key: 'days', render: (_, p) => (
                   <div>
-                    <Text strong>{p.days}</Text>
-                    {p.rawDays != null && p.rawDays !== p.days && (
+                    <Text strong style={{ color: p.days < 0 ? '#cf1322' : undefined }}>{p.days}</Text>
+                    {p.rawDays != null && p.rawDays !== p.days && !p.inverted && (
                       <div>
                         <Text type="secondary" style={{ fontSize: 11 }}>
                           {p.days === 0 ? `${p.rawDays} d held, all outside FY` : `actual ${p.rawDays} d, FY-clamped`}
@@ -1029,7 +1044,7 @@ export default function Dividends() {
                   </div>
                 )},
                 { title: 'Weighted Shares', dataIndex: 'weighted',
-                  render: v => <Text strong style={{ color: '#3f8600' }}>{Number(v).toFixed(4)}</Text>
+                  render: v => <Text strong style={{ color: Number(v) < 0 ? '#cf1322' : '#3f8600' }}>{Number(v).toFixed(4)}</Text>
                 },
                 { title: 'Formula', key: 'formula',
                   render: (_, p) => <Text type="secondary" style={{ fontFamily: 'monospace', fontSize: 12 }}>

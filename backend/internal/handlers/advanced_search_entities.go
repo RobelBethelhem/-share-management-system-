@@ -244,3 +244,46 @@ func SearchAllocationsAdvanced(c *gin.Context) {
 	query.Offset(offset).Limit(input.PageSize).Order("id DESC").Find(&rows)
 	c.JSON(http.StatusOK, gin.H{"data": rows, "total": total, "page": input.Page, "page_size": input.PageSize})
 }
+
+// ----- Dividends -----
+
+var dividendFieldType = map[string]string{
+	"id":                  "int",
+	"shareholder_id":      "int",
+	"dividend_setting_id": "int",
+	"fiscal_year":         "string",
+	"weighted_avg_shares": "number",
+	"gross_dividend":      "number",
+	"tax_amount":          "number",
+	"net_dividend":        "number",
+	"collected_amount":    "number",
+	"uncollected_amount":  "number",
+	"reinvested_amount":   "number",
+	"payment_method":      "enum",
+	"is_blocked":          "bool",
+	"is_transferred":      "bool",
+	"is_transfer_pending": "bool",
+	"transfer_to":         "string",
+	"transfer_reason":     "enum",
+	"status":              "enum",
+	"approval_status":     "enum",
+	"collection_date":     "date",
+	"created_at":          "date",
+}
+
+func SearchDividendsAdvanced(c *gin.Context) {
+	var input AdvSearchInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	offset := NormalizePaging(&input)
+	query := database.DB.Model(&models.Dividend{}).Preload("Shareholder")
+	query = ApplyAdvancedFilters(query, input.Filters, dividendFieldType)
+
+	var total int64
+	query.Count(&total)
+	var rows []models.Dividend
+	query.Offset(offset).Limit(input.PageSize).Order("id DESC").Find(&rows)
+	c.JSON(http.StatusOK, gin.H{"data": rows, "total": total, "page": input.Page, "page_size": input.PageSize})
+}

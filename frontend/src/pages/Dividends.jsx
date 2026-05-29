@@ -6,7 +6,7 @@ import {
 } from 'antd';
 import {
   DollarOutlined, InfoCircleOutlined, RiseOutlined, HistoryOutlined,
-  CalculatorOutlined, FileExcelOutlined, PrinterOutlined,
+  CalculatorOutlined, FileExcelOutlined, PrinterOutlined, FilterOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import * as XLSX from 'xlsx';
@@ -15,8 +15,35 @@ import {
   getDividends, collectDividend, blockDividend, releaseDividend,
   transferDividend, reinvestDividend, getDividendBreakdown, getDividendHistory,
   getBankCapital, searchShareholders, getShareholderInvestmentSummary,
+  searchDividendsAdvanced,
 } from '../services/api';
 import { formatCurrency, formatNumber, paymentMethods } from '../utils/format';
+import AdvancedSearchPanel from '../components/AdvancedSearchPanel';
+
+// Field whitelist for the dividend advanced-search panel. Mirrors the
+// backend's dividendFieldType map exactly so every field is filterable.
+const DIVIDEND_FIELDS = [
+  { key: 'id',                  label: 'Dividend ID',     type: 'int' },
+  { key: 'shareholder_id',      label: 'Shareholder ID',  type: 'int' },
+  { key: 'fiscal_year',         label: 'Fiscal Year',     type: 'string' },
+  { key: 'weighted_avg_shares', label: 'W.Avg Shares',    type: 'number' },
+  { key: 'gross_dividend',      label: 'Gross Dividend',  type: 'number' },
+  { key: 'tax_amount',          label: 'Tax Amount',      type: 'number' },
+  { key: 'net_dividend',        label: 'Net Dividend',    type: 'number' },
+  { key: 'collected_amount',    label: 'Collected',       type: 'number' },
+  { key: 'uncollected_amount',  label: 'Uncollected',     type: 'number' },
+  { key: 'reinvested_amount',   label: 'Reinvested',      type: 'number' },
+  { key: 'payment_method',      label: 'Payment Method',  type: 'enum', options: paymentMethods },
+  { key: 'is_blocked',          label: 'Blocked',         type: 'bool' },
+  { key: 'is_transferred',      label: 'Transferred',     type: 'bool' },
+  { key: 'is_transfer_pending', label: 'Transfer Pending', type: 'bool' },
+  { key: 'transfer_to',         label: 'Transferred To',  type: 'string' },
+  { key: 'transfer_reason',     label: 'Transfer Reason', type: 'enum', options: [{value:'inheritance',label:'Inheritance'},{value:'legal_order',label:'Legal Order'}] },
+  { key: 'status',              label: 'Status',          type: 'enum', options: [{value:'pending',label:'Pending'},{value:'partial',label:'Partial'},{value:'collected',label:'Collected'},{value:'transferred',label:'Transferred'},{value:'settled',label:'Settled'}] },
+  { key: 'approval_status',     label: 'Approval Status', type: 'enum', options: [{value:'pending',label:'Pending'},{value:'approved',label:'Approved'},{value:'rejected',label:'Rejected'}] },
+  { key: 'collection_date',     label: 'Collection Date', type: 'date' },
+  { key: 'created_at',          label: 'Created At',      type: 'date' },
+];
 
 // Excel export schema. Each column is a key, user-facing label, group (for
 // UI sectioning), getter (cell value as PRIMITIVE — no JSX), and a
@@ -60,6 +87,8 @@ export default function Dividends() {
   const [transferModal, setTransferModal] = useState(null);
   const [subscribeModal, setSubscribeModal] = useState(null);
   const [parValue, setParValue] = useState(0);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [activeFilters, setActiveFilters] = useState(null);
 
   useEffect(() => {
     getBankCapital().then(res => setParValue(res.data?.data?.par_value_per_share || 0)).catch(() => {});
@@ -515,14 +544,27 @@ export default function Dividends() {
   const fetchData = async () => {
     setLoading(true);
     try {
-      const res = await getDividends({ page, page_size: 20, fiscal_year: fiscalYear });
-      setData(res.data.data || []);
-      setTotal(res.data.total || 0);
-    } catch { message.error('Failed to load'); }
+      if (activeFilters) {
+        const res = await searchDividendsAdvanced({ filters: activeFilters, page, page_size: 20 });
+        setData(res.data.data || []);
+        setTotal(res.data.total || 0);
+      } else {
+        const res = await getDividends({ page, page_size: 20, fiscal_year: fiscalYear });
+        setData(res.data.data || []);
+        setTotal(res.data.total || 0);
+      }
+    } catch (err) { message.error(err.response?.data?.error || 'Failed to load'); }
     setLoading(false);
   };
 
-  useEffect(() => { fetchData(); }, [page, fiscalYear]);
+  useEffect(() => { fetchData(); }, [page, fiscalYear, activeFilters]);
+
+  const runAdvancedSearch = (cleaned) => {
+    if (cleaned.length === 0) { message.warning('Add at least one filter.'); return; }
+    setPage(1);
+    setActiveFilters(cleaned);
+  };
+  const resetAdvancedSearch = () => { setActiveFilters(null); setPage(1); };
 
   const loadExpanded = async (dividendId) => {
     if (expandedCache[dividendId]?.breakdown && expandedCache[dividendId]?.history) return;
@@ -1203,9 +1245,30 @@ export default function Dividends() {
             Export Excel
           </Button>
           <Input placeholder="Filter by fiscal year" style={{ width: 200 }}
-            onChange={(e) => setFiscalYear(e.target.value)} allowClear />
+            value={fiscalYear}
+            onChange={(e) => setFiscalYear(e.target.value)} allowClear
+            disabled={!!activeFilters} />
+          <Button
+            icon={<FilterOutlined />}
+            type={advancedOpen ? 'primary' : 'default'}
+            onClick={() => setAdvancedOpen(o => !o)}
+          >
+            {advancedOpen ? 'Hide Advanced Search' : 'Advanced Search'}
+          </Button>
+          {activeFilters && (
+            <Tag color="blue" closable onClose={resetAdvancedSearch}>
+              {activeFilters.length} filter{activeFilters.length === 1 ? '' : 's'} applied
+            </Tag>
+          )}
         </Space>
       </Row>
+
+      <AdvancedSearchPanel
+        fields={DIVIDEND_FIELDS}
+        open={advancedOpen}
+        onSearch={runAdvancedSearch}
+        onReset={resetAdvancedSearch}
+      />
 
       <Table dataSource={data} columns={columns} rowKey="id" loading={loading} size="small"
         pagination={{ current: page, total, pageSize: 20, onChange: setPage }} scroll={{ x: 1500 }}

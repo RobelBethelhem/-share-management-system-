@@ -174,6 +174,7 @@ func main() {
 		api.POST("/share-blocks/search-advanced", handlers.SearchShareBlocksAdvanced)
 		api.POST("/certificates/search-advanced", handlers.SearchCertificatesAdvanced)
 		api.POST("/allocations/search-advanced", handlers.SearchAllocationsAdvanced)
+		api.POST("/dividends/search-advanced", handlers.SearchDividendsAdvanced)
 		api.GET("/shareholders/:id", handlers.GetShareholder)
 		api.POST("/shareholders", handlers.CreateShareholder)
 		api.PUT("/shareholders/:id", handlers.UpdateShareholder)

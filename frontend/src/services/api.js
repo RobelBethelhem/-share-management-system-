@@ -45,6 +45,7 @@ export const searchTransfersAdvanced     = (data) => api.post('/transfers/search
 export const searchShareBlocksAdvanced   = (data) => api.post('/share-blocks/search-advanced', data);
 export const searchCertificatesAdvanced  = (data) => api.post('/certificates/search-advanced', data);
 export const searchAllocationsAdvanced   = (data) => api.post('/allocations/search-advanced', data);
+export const searchDividendsAdvanced      = (data) => api.post('/dividends/search-advanced', data);
 export const createShareholder = (data) => api.post('/shareholders', data);
 export const updateShareholder = (id, data) => api.put(`/shareholders/${id}`, data);
 export const deleteShareholder = (id) => api.delete(`/shareholders/${id}`);

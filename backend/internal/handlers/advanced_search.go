@@ -55,17 +55,23 @@ func ApplyAdvancedFilters(query *gorm.DB, filters []AdvFilter, fieldTypes map[st
 			if v == "" {
 				continue
 			}
+			// Case-insensitive: LOWER() both sides. TiDB's default collation
+			// (utf8mb4_bin) is case-sensitive, so without this "john" wouldn't
+			// match "John". Applies to every entity's string filters
+			// (first/middle/last name, account no, references, remarks, …).
+			lc := "LOWER(" + col + ")"
+			lv := strings.ToLower(v)
 			switch f.Op {
 			case "contains":
-				query = query.Where(col+" LIKE ?", "%"+v+"%")
+				query = query.Where(lc+" LIKE ?", "%"+lv+"%")
 			case "starts_with":
-				query = query.Where(col+" LIKE ?", v+"%")
+				query = query.Where(lc+" LIKE ?", lv+"%")
 			case "ends_with":
-				query = query.Where(col+" LIKE ?", "%"+v)
+				query = query.Where(lc+" LIKE ?", "%"+lv)
 			case "equals":
-				query = query.Where(col+" = ?", v)
+				query = query.Where(lc+" = ?", lv)
 			case "not_equals":
-				query = query.Where(col+" <> ?", v)
+				query = query.Where(lc+" <> ?", lv)
 			}
 		case "enum":
 			v := strings.TrimSpace(fmt.Sprint(f.Value))

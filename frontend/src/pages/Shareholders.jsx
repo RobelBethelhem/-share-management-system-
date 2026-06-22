@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
-  Table, Button, Modal, Form, Input, Select, DatePicker, Space, Tag,
-  message, Typography, Row, Col, Card, Tabs, Switch, Descriptions, Popconfirm,
+  Table, Button, Modal, Form, Input, InputNumber, Select, DatePicker, Space, Tag,
+  message, Typography, Row, Col, Card, Tabs, Switch, Descriptions, Popconfirm, Alert,
 } from 'antd';
 import {
   PlusOutlined, EditOutlined, EyeOutlined, DeleteOutlined, FilterOutlined,
@@ -269,6 +269,19 @@ export default function Shareholders() {
                 <>
                   <Row gutter={16}>
                     <Col span={8}>
+                      <Form.Item
+                        name="id"
+                        label="Shareholder ID (optional)"
+                        tooltip="Leave blank to auto-assign the next sequential ID. Enter a value only to preserve a pre-existing ID from your old system. If the ID is already taken, you'll get an error."
+                      >
+                        <InputNumber style={{ width: '100%' }} min={1} precision={0}
+                          placeholder="Auto"
+                          disabled={!!editing}
+                          formatter={(v) => v ? `${v}` : ''}
+                          parser={(v) => v ? v.replace(/\D/g, '') : ''} />
+                      </Form.Item>
+                    </Col>
+                    <Col span={8}>
                       <Form.Item name="account_no" label="Account No" rules={[{ required: true }]}>
                         <Input />
                       </Form.Item>
@@ -278,14 +291,22 @@ export default function Shareholders() {
                         <Select options={shareholderTypes} />
                       </Form.Item>
                     </Col>
+                  </Row>
+                  {!editing && (
+                    <Alert
+                      type="info"
+                      showIcon
+                      style={{ marginBottom: 12 }}
+                      message="Shareholder ID is auto-assigned (next sequential number) when left blank. Only fill it in to carry over an existing ID from a previous system."
+                    />
+                  )}
+                  <Row gutter={16}>
                     <Col span={8}>
                       <Form.Item name="nationality" label="Nationality (English)">
                         <Input />
                       </Form.Item>
                     </Col>
-                  </Row>
-                  <Row gutter={16}>
-                    <Col span={8} offset={16}>
+                    <Col span={8}>
                       <Form.Item name="nationality_am" label="Nationality (አማርኛ)">
                         <Input />
                       </Form.Item>

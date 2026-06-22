@@ -1,8 +1,10 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"share-management-system/internal/database"
 	"share-management-system/internal/models"
@@ -178,9 +180,53 @@ func CreateShareholder(c *gin.Context) {
 	}
 
 	shareholder := input.Shareholder
-	if err := database.DB.Create(&shareholder).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create shareholder"})
-		return
+
+	if shareholder.ID > 0 {
+		// User supplied a Shareholder ID (preserving an ID from a previous
+		// system). Reject if it's already used — Unscoped() so a soft-deleted
+		// row's ID isn't silently reused (the physical PK still exists and
+		// would collide).
+		var idTaken int64
+		database.DB.Unscoped().Model(&models.Shareholder{}).
+			Where("id = ?", shareholder.ID).Count(&idTaken)
+		if idTaken > 0 {
+			c.JSON(http.StatusConflict, gin.H{"error": fmt.Sprintf(
+				"Shareholder ID %d is already in use. Leave the field blank to auto-assign the next number, or choose a different ID.",
+				shareholder.ID)})
+			return
+		}
+		if err := database.DB.Create(&shareholder).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	} else {
+		// Auto-assign a sequential ID = MAX(id)+1. We set the PK explicitly
+		// rather than relying on the DB AUTO_INCREMENT: TiDB hands out
+		// auto-increment values in large per-node cached batches, which is
+		// why IDs jumped from 5 to 2,090,001. Explicit MAX+1 keeps them
+		// 1, 2, 3, … and starts at 1 on a fresh table. Retry on a
+		// duplicate-key race (two creates picking the same MAX+1 at once).
+		created := false
+		for attempt := 0; attempt < 6; attempt++ {
+			var maxID uint
+			database.DB.Unscoped().Model(&models.Shareholder{}).
+				Select("COALESCE(MAX(id), 0)").Scan(&maxID)
+			shareholder.ID = maxID + 1
+			err := database.DB.Create(&shareholder).Error
+			if err == nil {
+				created = true
+				break
+			}
+			if !strings.Contains(strings.ToLower(err.Error()), "duplicate") {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			shareholder.ID = 0 // collided — recompute MAX+1 and retry
+		}
+		if !created {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not assign a unique shareholder ID after several attempts. Please retry."})
+			return
+		}
 	}
 
 	if input.Address != nil {
@@ -232,9 +278,14 @@ func SearchShareholders(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"data": []interface{}{}})
 		return
 	}
-	like := "%" + q + "%"
+	// Case-insensitive: lowercase both the query and the columns. TiDB's
+	// default collation (utf8mb4_bin) is case-sensitive, so a plain LIKE
+	// wouldn't match "john" against "John". Also search middle_name.
+	like := "%" + strings.ToLower(q) + "%"
 	var shareholders []models.Shareholder
-	database.DB.Where("first_name LIKE ? OR last_name LIKE ? OR account_no LIKE ?", like, like, like).
+	database.DB.Where(
+		"LOWER(first_name) LIKE ? OR LOWER(middle_name) LIKE ? OR LOWER(last_name) LIKE ? OR LOWER(account_no) LIKE ?",
+		like, like, like, like).
 		Limit(20).Find(&shareholders)
 	c.JSON(http.StatusOK, gin.H{"data": shareholders})
 }

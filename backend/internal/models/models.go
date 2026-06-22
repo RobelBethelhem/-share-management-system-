@@ -461,6 +461,11 @@ type PendingApproval struct {
 	ApprovedBy   *uint      `json:"approved_by"`
 	Status       string     `gorm:"size:30;default:'pending'" json:"status"` // pending, approved, rejected
 	Remark       string     `gorm:"type:text" json:"remark"`
+	// Payload holds a JSON snapshot of a proposed change for approvals where
+	// the entity already exists and the change is a diff rather than a new
+	// row (currently: shareholder update). Applied on approve, ignored on
+	// reject. Empty for create/delete and for entities that flip a status.
+	Payload      string     `gorm:"type:text" json:"payload,omitempty"`
 	RequestedAt  time.Time  `json:"requested_at"`
 	ProcessedAt  *time.Time `json:"processed_at"`
 	CreatedAt    time.Time  `json:"created_at"`

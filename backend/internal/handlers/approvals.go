@@ -111,6 +111,21 @@ func ApproveItem(c *gin.Context) {
 		// Approval transitions draft → approved. Admin then clicks Start on the
 		// CI detail page to enter round_open and run Round 1.
 		database.DB.Model(&models.CapitalIncrease{}).Where("id = ?", approval.EntityID).Update("status", "approved")
+	case "shareholder":
+		// Edit/delete of a shareholder is held until approved here. Add stays
+		// immediate (CreateShareholder doesn't queue an approval).
+		if approval.Action == "delete" {
+			database.DB.Delete(&models.Shareholder{}, approval.EntityID)
+		} else {
+			if err := ApplyShareholderUpdate(approval.EntityID, approval.Payload); err != nil {
+				approval.Status = "pending"
+				approval.ApprovedBy = nil
+				approval.ProcessedAt = nil
+				database.DB.Save(&approval)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Shareholder update failed: " + err.Error()})
+				return
+			}
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Item approved"})
@@ -278,6 +293,19 @@ func ApproveByEntity(c *gin.Context) {
 		database.DB.Model(&models.AGMProxy{}).Where("id = ?", approval.EntityID).Update("status", "approved")
 	case "capital_increase":
 		database.DB.Model(&models.CapitalIncrease{}).Where("id = ?", approval.EntityID).Update("status", "approved")
+	case "shareholder":
+		if approval.Action == "delete" {
+			database.DB.Delete(&models.Shareholder{}, approval.EntityID)
+		} else {
+			if err := ApplyShareholderUpdate(approval.EntityID, approval.Payload); err != nil {
+				approval.Status = "pending"
+				approval.ApprovedBy = nil
+				approval.ProcessedAt = nil
+				database.DB.Save(&approval)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Shareholder update failed: " + err.Error()})
+				return
+			}
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Item approved"})

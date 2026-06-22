@@ -1,10 +1,12 @@
 package handlers
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"share-management-system/internal/database"
 	"share-management-system/internal/models"
@@ -237,6 +239,22 @@ func CreateShareholder(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"message": "Shareholder created", "id": shareholder.ID})
 }
 
+// hasPendingShareholderApproval reports whether a shareholder already has a
+// pending update/delete awaiting authorization — used to block stacking two
+// conflicting changes on the same record.
+func hasPendingShareholderApproval(shID uint) bool {
+	var n int64
+	database.DB.Model(&models.PendingApproval{}).
+		Where("entity_type = ? AND entity_id = ? AND status = ?", "shareholder", shID, "pending").
+		Count(&n)
+	return n > 0
+}
+
+// UpdateShareholder does NOT apply the change directly — edits to a
+// shareholder require authorization. The proposed change is captured as a
+// JSON payload on a PendingApproval and applied only when approved
+// (ApplyShareholderUpdate). Adding a shareholder stays immediate (see
+// CreateShareholder); only update/delete go through approval.
 func UpdateShareholder(c *gin.Context) {
 	id := c.Param("id")
 	var shareholder models.Shareholder
@@ -254,22 +272,78 @@ func UpdateShareholder(c *gin.Context) {
 		return
 	}
 
-	database.DB.Model(&shareholder).Updates(input.Shareholder)
+	if hasPendingShareholderApproval(shareholder.ID) {
+		c.JSON(http.StatusConflict, gin.H{"error": "This shareholder already has a change awaiting authorization. Approve or reject it first."})
+		return
+	}
 
+	payload, err := json.Marshal(input)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to encode proposed change"})
+		return
+	}
+	database.DB.Create(&models.PendingApproval{
+		EntityType:  "shareholder",
+		EntityID:    shareholder.ID,
+		Action:      "update",
+		Payload:     string(payload),
+		RequestedBy: getUserID(c),
+		Status:      "pending",
+		RequestedAt: time.Now(),
+	})
+	c.JSON(http.StatusOK, gin.H{"message": "Edit submitted for authorization", "pending": true})
+}
+
+// DeleteShareholder queues the deletion for authorization instead of removing
+// the record immediately.
+func DeleteShareholder(c *gin.Context) {
+	id := c.Param("id")
+	var shareholder models.Shareholder
+	if err := database.DB.First(&shareholder, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Shareholder not found"})
+		return
+	}
+	if hasPendingShareholderApproval(shareholder.ID) {
+		c.JSON(http.StatusConflict, gin.H{"error": "This shareholder already has a change awaiting authorization. Approve or reject it first."})
+		return
+	}
+	database.DB.Create(&models.PendingApproval{
+		EntityType:  "shareholder",
+		EntityID:    shareholder.ID,
+		Action:      "delete",
+		RequestedBy: getUserID(c),
+		Status:      "pending",
+		RequestedAt: time.Now(),
+	})
+	c.JSON(http.StatusOK, gin.H{"message": "Delete submitted for authorization", "pending": true})
+}
+
+// ApplyShareholderUpdate applies a queued update payload onto the live
+// shareholder. Called by the approval handler when a shareholder/update
+// approval is approved. Mirrors the original direct-update logic (struct
+// Updates skips zero-value fields; address upserted).
+func ApplyShareholderUpdate(shID uint, payload string) error {
+	var input struct {
+		models.Shareholder
+		Address *models.ShareholderAddress `json:"address"`
+	}
+	if err := json.Unmarshal([]byte(payload), &input); err != nil {
+		return err
+	}
+	var shareholder models.Shareholder
+	if err := database.DB.First(&shareholder, shID).Error; err != nil {
+		return err
+	}
+	if err := database.DB.Model(&shareholder).Updates(input.Shareholder).Error; err != nil {
+		return err
+	}
 	if input.Address != nil {
 		input.Address.ShareholderID = shareholder.ID
 		database.DB.Where("shareholder_id = ?", shareholder.ID).
 			Assign(input.Address).
 			FirstOrCreate(&models.ShareholderAddress{})
 	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "Shareholder updated"})
-}
-
-func DeleteShareholder(c *gin.Context) {
-	id := c.Param("id")
-	database.DB.Delete(&models.Shareholder{}, id)
-	c.JSON(http.StatusOK, gin.H{"message": "Shareholder deleted"})
+	return nil
 }
 
 func SearchShareholders(c *gin.Context) {

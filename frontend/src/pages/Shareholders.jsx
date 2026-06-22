@@ -122,7 +122,8 @@ export default function Shareholders() {
 
       if (editing) {
         await updateShareholder(editing.id, payload);
-        message.success('Shareholder updated');
+        // Edits require authorization — the change is queued, not applied yet.
+        message.success('Edit submitted for authorization. It will apply once approved on the Authorization tab.');
       } else {
         await createShareholder(payload);
         message.success('Shareholder created');
@@ -158,9 +159,14 @@ export default function Shareholders() {
   };
 
   const handleDelete = async (id) => {
-    await deleteShareholder(id);
-    message.success('Deleted');
-    if (activeFilters) fetchAdvanced(activeFilters); else fetchSimple();
+    try {
+      await deleteShareholder(id);
+      // Deletion requires authorization — queued, not removed yet.
+      message.success('Delete submitted for authorization. The shareholder is removed once approved.');
+      if (activeFilters) fetchAdvanced(activeFilters); else fetchSimple();
+    } catch (err) {
+      message.error(err.response?.data?.error || 'Failed to submit deletion');
+    }
   };
 
   const columns = [
@@ -185,7 +191,10 @@ export default function Shareholders() {
         <Space>
           <Button size="small" icon={<EyeOutlined />} onClick={() => navigate(`/shareholders/${record.id}`)} />
           <Button size="small" icon={<EditOutlined />} onClick={() => handleEdit(record)} />
-          <Popconfirm title="Delete?" onConfirm={() => handleDelete(record.id)}>
+          <Popconfirm
+            title="Request deletion?"
+            description="This will be sent to the Authorization tab and removed only after approval."
+            onConfirm={() => handleDelete(record.id)}>
             <Button size="small" danger icon={<DeleteOutlined />} />
           </Popconfirm>
         </Space>

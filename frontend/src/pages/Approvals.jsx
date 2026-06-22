@@ -17,17 +17,17 @@ const { Title, Text } = Typography;
 const TYPE_COLORS = {
   investment: 'blue', transfer: 'purple', subscription: 'green',
   block: 'red', dividend: 'orange', trade_request: 'magenta', proxy: 'cyan',
-  capital_increase: 'gold',
+  capital_increase: 'gold', shareholder: 'geekblue',
 };
 const TYPE_LABELS = {
   investment: 'INVESTMENT', transfer: 'TRANSFER', subscription: 'SUBSCRIPTION',
   block: 'SHARE BLOCK', dividend: 'DIVIDEND', trade_request: 'MARKETPLACE TRADE', proxy: 'AGM PROXY',
-  capital_increase: 'CAPITAL INCREASE',
+  capital_increase: 'CAPITAL INCREASE', shareholder: 'SHAREHOLDER',
 };
 const TYPE_ICONS = {
   investment: <BankOutlined />, transfer: <SwapOutlined />, subscription: <FileTextOutlined />,
   block: <LockOutlined />, dividend: <DollarOutlined />, trade_request: <ShopOutlined />, proxy: <TeamOutlined />,
-  capital_increase: <RiseOutlined />,
+  capital_increase: <RiseOutlined />, shareholder: <UserOutlined />,
 };
 
 const formatETB = (v) => `ETB ${Number(v || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
@@ -80,6 +80,8 @@ export default function Approvals() {
         const r = await api.get(`/capital-increases/${id}`);
         return { detail: r.data.data, extras: { remaining: r.data.remaining } };
       }
+      case 'shareholder':
+        return { detail: (await api.get(`/shareholders/${id}`)).data };
       case 'trade_request': {
         const r = await api.get(`/marketplace/trades/${id}`);
         return { detail: r.data.data, extras: { fees: r.data.fees } };
@@ -191,6 +193,7 @@ export default function Approvals() {
             { value: 'block', label: 'Share Block' },
             { value: 'dividend', label: 'Dividend' },
             { value: 'capital_increase', label: 'Capital Increase' },
+            { value: 'shareholder', label: 'Shareholder' },
             { value: 'trade_request', label: 'Marketplace Trade' },
             { value: 'proxy', label: 'AGM Proxy' },
           ]}
@@ -254,7 +257,76 @@ function ReviewBody({ item }) {
   if (t === 'dividend')      return <DividendBody detail={item.detail} />;
   if (t === 'trade_request') return <TradeBody trade={item.detail} fees={item.extras?.fees} />;
   if (t === 'proxy')         return <ProxyBody data={item.detail} extras={item.extras} />;
+  if (t === 'shareholder')   return <ShareholderBody detail={item.detail} approval={item.approval} />;
   return <Spin />;
+}
+
+// ShareholderBody renders an edit/delete approval for a shareholder. For an
+// edit it shows a field-by-field current → proposed diff (parsed from the
+// approval's payload); for a delete it shows a destructive warning.
+function ShareholderBody({ detail, approval }) {
+  const sh = detail?.shareholder;
+  if (!sh) return <Spin />;
+  const action = approval?.action || 'update';
+
+  if (action === 'delete') {
+    return (
+      <>
+        <Card size="small" style={{ background: '#fff1f0', borderColor: '#ffccc7', marginBottom: 12 }}>
+          <Text strong style={{ color: '#cf1322' }}>⚠ Deletion request</Text>
+          <div style={{ marginTop: 4 }}>Approving permanently removes this shareholder.</div>
+        </Card>
+        <Descriptions bordered size="small" column={2}>
+          <Descriptions.Item label="Sh. ID">{sh.id}</Descriptions.Item>
+          <Descriptions.Item label="Account No">{sh.account_no}</Descriptions.Item>
+          <Descriptions.Item label="Name" span={2}>{fullName(sh)}</Descriptions.Item>
+          <Descriptions.Item label="Type">{sh.shareholder_type}</Descriptions.Item>
+          <Descriptions.Item label="Phone">{sh.phone || '-'}</Descriptions.Item>
+        </Descriptions>
+      </>
+    );
+  }
+
+  // Parse the proposed change from the approval payload.
+  let proposed = null;
+  try { proposed = approval?.payload ? JSON.parse(approval.payload) : null; } catch { proposed = null; }
+
+  // Compare a focused set of fields; show only those that changed.
+  const fields = [
+    ['account_no', 'Account No'], ['first_name', 'First Name'], ['middle_name', 'Middle Name'],
+    ['last_name', 'Last Name'], ['shareholder_type', 'Type'], ['gender', 'Gender'],
+    ['nationality', 'Nationality'], ['tin', 'TIN'], ['national_id_no', 'National ID'],
+    ['passport_no', 'Passport No'], ['phone', 'Phone'], ['phone2', 'Phone 2'],
+    ['email', 'Email'], ['status', 'Status'],
+  ];
+  const norm = (v) => (v == null ? '' : String(v));
+  const changes = proposed
+    ? fields.filter(([k]) => norm(proposed[k]) !== norm(sh[k]) && (norm(proposed[k]) !== '' || norm(sh[k]) !== ''))
+    : [];
+
+  return (
+    <>
+      <Card size="small" style={{ background: '#f0f5ff', borderColor: '#adc6ff', marginBottom: 12 }}>
+        <Text strong>Edit request for <Text strong>{fullName(sh)}</Text> (Sh. ID {sh.id})</Text>
+        <div style={{ marginTop: 4, fontSize: 12, color: '#666' }}>
+          {changes.length > 0
+            ? `${changes.length} field${changes.length === 1 ? '' : 's'} will change on approval.`
+            : 'No tracked field differs (the edit may only touch address or untracked fields).'}
+        </div>
+      </Card>
+      {changes.length > 0 && (
+        <Table
+          size="small" pagination={false} rowKey={(r) => r.key}
+          dataSource={changes.map(([k, label]) => ({ key: k, label, from: norm(sh[k]) || '—', to: norm(proposed[k]) || '—' }))}
+          columns={[
+            { title: 'Field', dataIndex: 'label', width: 160 },
+            { title: 'Current', dataIndex: 'from', render: v => <Text type="secondary">{v}</Text> },
+            { title: 'Proposed', dataIndex: 'to', render: v => <Text strong style={{ color: '#1677ff' }}>{v}</Text> },
+          ]}
+        />
+      )}
+    </>
+  );
 }
 
 function InvestmentBody({ detail }) {

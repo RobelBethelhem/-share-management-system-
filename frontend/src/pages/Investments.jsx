@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Table, Button, Modal, Form, Input, Select, DatePicker, InputNumber,
-  Space, Tag, message, Typography, Row, Col, Switch, Tooltip, Card, Descriptions, Spin, Divider,
+  Space, Tag, message, Typography, Row, Col, Switch, Tooltip, Card, Descriptions, Spin, Divider, Alert,
 } from 'antd';
 import {
   PlusOutlined, SearchOutlined, FilterOutlined,
@@ -11,6 +11,7 @@ import dayjs from 'dayjs';
 import {
   getInvestments, createInvestment, searchShareholders, getShareholders,
   getShareholderInvestmentSummary, getBankCapital, searchInvestmentsAdvanced,
+  getDividends, reinvestDividend,
 } from '../services/api';
 import { formatCurrency, paymentMethods } from '../utils/format';
 import { formatEthiopianDate } from '../utils/ethiopianDate';
@@ -63,8 +64,22 @@ export default function Investments() {
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [selectedAlloc, setSelectedAlloc] = useState(null); // for cap validation
   const [allocDetailOpen, setAllocDetailOpen] = useState(false); // per-allocation detail modal
+  // Dividend-as-payment: the shareholder's reinvestable dividends + the chosen source.
+  const [shDividends, setShDividends] = useState([]);
+  const [selectedDividend, setSelectedDividend] = useState(null);
+  const [dividendsLoading, setDividendsLoading] = useState(false);
   const [form] = Form.useForm();
   const lastChanged = useRef(null);
+
+  // Reactive watches so the dividend section can preview shares live.
+  const watchedMethod = Form.useWatch('payment_method', form);
+  const watchedDivReinvest = Form.useWatch('div_reinvest_amount', form);
+  const watchedDivAdditional = Form.useWatch('div_additional_amount', form);
+
+  // Reinvestable balance of a dividend = gross − already-reinvested − collected.
+  const reinvestableOf = (d) => d
+    ? Math.max(0, (d.gross_dividend || 0) - (d.reinvested_amount || 0) - (d.collected_amount || 0))
+    : 0;
 
   // Fetch par value from bank capital settings
   useEffect(() => {
@@ -178,6 +193,44 @@ export default function Investments() {
       }
     } catch { setSummary(null); }
     setSummaryLoading(false);
+    // If "Dividend" is already the chosen method, refresh the source list.
+    if (form.getFieldValue('payment_method') === 'dividend') loadShareholderDividends(shId);
+  };
+
+  // Load the shareholder's dividends that still have a reinvestable balance
+  // (across all fiscal years — e.g. an uncollected 2025 plus 2026). Excludes
+  // blocked / transferred dividends.
+  const loadShareholderDividends = async (shId) => {
+    if (!shId) { setShDividends([]); setSelectedDividend(null); return; }
+    setDividendsLoading(true);
+    try {
+      const res = await getDividends({ shareholder_id: shId, page_size: 100 });
+      const list = (res.data.data || []).filter(
+        d => !d.is_blocked && !d.is_transferred && reinvestableOf(d) > 0.005,
+      );
+      setShDividends(list);
+      // Auto-select when there's only one source.
+      if (list.length === 1) {
+        setSelectedDividend(list[0]);
+        form.setFieldValue('dividend_source', list[0].id);
+      } else {
+        setSelectedDividend(null);
+        form.setFieldValue('dividend_source', undefined);
+      }
+    } catch { setShDividends([]); setSelectedDividend(null); }
+    setDividendsLoading(false);
+  };
+
+  // When the payment method changes to/from Dividend, load or clear the
+  // dividend source list.
+  const handlePaymentMethodChange = (method) => {
+    if (method === 'dividend') {
+      loadShareholderDividends(form.getFieldValue('shareholder_id'));
+    } else {
+      setShDividends([]);
+      setSelectedDividend(null);
+      form.setFieldsValue({ dividend_source: undefined, div_reinvest_amount: undefined, div_additional_amount: undefined });
+    }
   };
 
   const handleAllocationSelect = (allocId) => {
@@ -248,18 +301,74 @@ export default function Investments() {
     setSummary(null);
     setSelectedAlloc(null);
     setShareholders([]);
+    setShDividends([]);
+    setSelectedDividend(null);
     lastChanged.current = null;
     setModalOpen(true);
   };
 
+  const closeInvestmentModal = () => {
+    setModalOpen(false);
+    form.resetFields();
+    setSummary(null);
+    setSelectedAlloc(null);
+    setAllocDetailOpen(false);
+    setShDividends([]);
+    setSelectedDividend(null);
+  };
+
   const handleSubmit = async (values) => {
+    // ── Dividend-as-payment path ────────────────────────────────────────
+    // Reuse the dividend "reinvest" engine: fund the chosen allocation's
+    // unpaid shares from a selected dividend (+ optional cash top-up). No new
+    // allocation is created; the dividend ledger (reinvested/tax/uncollected)
+    // is recomputed server-side.
+    if (values.payment_method === 'dividend') {
+      if (!selectedDividend) { message.error('Pick a dividend source to reinvest from.'); return; }
+      if (!values.allocation_id) { message.error('Pick the allocation this dividend should pay down (above).'); return; }
+      const reinv = Number(values.div_reinvest_amount || 0);
+      const addl = Number(values.div_additional_amount || 0);
+      const combined = reinv + addl;
+      if (parValue <= 0) { message.error('Par value is not configured.'); return; }
+      const shares = Math.floor(combined / parValue);
+      if (shares <= 0) { message.error('The combined amount is less than one whole share.'); return; }
+      const cap = selectedAlloc
+        ? Math.max(0, (selectedAlloc.allocated_shares || 0) - (selectedAlloc.paid_shares || 0) - (selectedAlloc.pending_shares || 0))
+        : 0;
+      if (shares > cap) {
+        message.error(`This would buy ${shares.toLocaleString()} shares but the allocation only has ${cap.toLocaleString()} unpaid. Reduce the amount.`);
+        return;
+      }
+      // Snap funding so reinvest + additional == shares × par exactly (backend
+      // requires the funding to match the distributed shares).
+      const used = shares * parValue;
+      const reinvestUsed = Math.min(reinv, used);
+      const additionalUsed = used - reinvestUsed;
+      try {
+        await reinvestDividend(selectedDividend.id, {
+          reinvest_amount: reinvestUsed,
+          additional_amount: additionalUsed,
+          additional_payment_method: values.div_additional_method || 'cash',
+          reference_no: values.reference_no || '',
+          from_account: values.from_account || '',
+          remark: values.remark || '',
+          distributions: [{ allocation_id: values.allocation_id, shares }],
+        });
+        message.success('Reinvested from dividend — investment created (pending approval). No new allocation made.');
+        closeInvestmentModal();
+        fetchData();
+      } catch (err) {
+        message.error(err.response?.data?.error || 'Reinvest failed');
+      }
+      return;
+    }
+
+    // ── Normal cash/bank/check/cpo path (unchanged) ─────────────────────
     try {
       if (values.payment_date) values.payment_date = values.payment_date.toISOString();
       await createInvestment(values);
       message.success('Investment recorded, pending approval');
-      setModalOpen(false);
-      form.resetFields();
-      setSummary(null);
+      closeInvestmentModal();
       fetchData();
     } catch (err) {
       message.error(err.response?.data?.error || 'Failed');
@@ -417,7 +526,7 @@ export default function Investments() {
         scroll={{ x: 1400 }} />
 
       {/* Create Modal */}
-      <Modal title="Record Investment" open={modalOpen} onCancel={() => { setModalOpen(false); setSummary(null); setAllocDetailOpen(false); }}
+      <Modal title="Record Investment" open={modalOpen} onCancel={() => { closeInvestmentModal(); }}
         footer={null} width={780}>
         <Form form={form} layout="vertical" onFinish={handleSubmit}>
 
@@ -539,7 +648,7 @@ export default function Investments() {
             </Col>
             <Col span={8}>
               <Form.Item name="payment_method" label="Payment Method" rules={[{ required: true }]}>
-                <Select options={paymentMethods} />
+                <Select options={paymentMethods} onChange={handlePaymentMethodChange} />
               </Form.Item>
             </Col>
           </Row>
@@ -589,6 +698,114 @@ export default function Investments() {
             </Col>
           </Row>
 
+          {watchedMethod === 'dividend' ? (() => {
+            const reinv = Number(watchedDivReinvest || 0);
+            const addl = Number(watchedDivAdditional || 0);
+            const combined = reinv + addl;
+            const shares = parValue > 0 ? Math.floor(combined / parValue) : 0;
+            const used = shares * parValue;
+            const residual = combined - used;
+            const reinvestable = reinvestableOf(selectedDividend);
+            const allocCap = selectedAlloc
+              ? Math.max(0, (selectedAlloc.allocated_shares || 0) - (selectedAlloc.paid_shares || 0) - (selectedAlloc.pending_shares || 0))
+              : 0;
+            const overCap = shares > allocCap;
+            return (
+              <>
+                <Divider style={{ margin: '4px 0 12px' }}>Reinvest from Dividend</Divider>
+                {dividendsLoading ? <Spin /> : shDividends.length === 0 ? (
+                  <Alert type="warning" showIcon style={{ marginBottom: 12 }}
+                    message="No uncollected dividend to reinvest"
+                    description="This shareholder has no dividend with a reinvestable balance. Choose a different payment method." />
+                ) : (
+                  <>
+                    <Row gutter={16}>
+                      <Col span={12}>
+                        <Form.Item name="dividend_source" label="Dividend Source"
+                          rules={[{ required: true, message: 'Pick which dividend to reinvest from' }]}
+                          tooltip="The shareholder may have uncollected dividends across fiscal years — pick which one funds this.">
+                          <Select
+                            placeholder="Select dividend…"
+                            onChange={(id) => {
+                              const d = shDividends.find(x => x.id === id);
+                              setSelectedDividend(d || null);
+                              const r = reinvestableOf(d);
+                              const outstanding = selectedAlloc ? Math.max(0, selectedAlloc.remaining_amount || 0) : r;
+                              form.setFieldValue('div_reinvest_amount', Math.min(r, outstanding || r));
+                            }}
+                            options={shDividends.map(d => ({
+                              value: d.id,
+                              label: `FY ${d.fiscal_year} — reinvestable ${formatCurrency(reinvestableOf(d))}`,
+                            }))}
+                          />
+                        </Form.Item>
+                      </Col>
+                      <Col span={12}>
+                        <div style={{ paddingTop: 30 }}>
+                          {selectedDividend && (
+                            <Text type="secondary" style={{ fontSize: 12 }}>
+                              Reinvestable from FY {selectedDividend.fiscal_year}: <Text strong>{formatCurrency(reinvestable)}</Text>
+                            </Text>
+                          )}
+                        </div>
+                      </Col>
+                    </Row>
+                    <Row gutter={16}>
+                      <Col span={8}>
+                        <Form.Item name="div_reinvest_amount" label="Amount to Reinvest from Dividend"
+                          tooltip="Removed from the dividend's taxable gross — no dividend tax on this portion."
+                          rules={[
+                            { required: true, message: 'Required' },
+                            { validator: (_, v) => {
+                                if (v == null) return Promise.resolve();
+                                if (v > reinvestable + 0.01) return Promise.reject(new Error(`Max reinvestable: ${formatCurrency(reinvestable)}`));
+                                return Promise.resolve();
+                              } },
+                          ]}>
+                          <InputNumber style={{ width: '100%' }} min={0} max={reinvestable}
+                            formatter={(v) => v ? `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',') : ''}
+                            parser={(v) => v.replace(/,/g, '')} />
+                        </Form.Item>
+                      </Col>
+                      <Col span={8}>
+                        <Form.Item name="div_additional_amount" label="Additional Amount (top-up)"
+                          tooltip="Optional cash/bank money so dividend + top-up fully pays the allocation.">
+                          <InputNumber style={{ width: '100%' }} min={0}
+                            formatter={(v) => v ? `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',') : ''}
+                            parser={(v) => v.replace(/,/g, '')} />
+                        </Form.Item>
+                      </Col>
+                      <Col span={8}>
+                        <Form.Item name="div_additional_method" label="Top-up Method" initialValue="cash">
+                          <Select options={paymentMethods.filter(p => p.value !== 'dividend')} />
+                        </Form.Item>
+                      </Col>
+                    </Row>
+                    {shares > 0 ? (
+                      <Alert
+                        type={overCap ? 'error' : residual > 0.005 ? 'warning' : 'success'}
+                        showIcon style={{ marginBottom: 12 }}
+                        message={overCap
+                          ? `${shares.toLocaleString()} shares exceeds the allocation's ${allocCap.toLocaleString()} unpaid shares — reduce the amount`
+                          : `Will pay down ${shares.toLocaleString()} share${shares === 1 ? '' : 's'} (ETB ${used.toLocaleString(undefined, { minimumFractionDigits: 2 })}) on ${selectedAlloc?.allocation_no || 'the selected allocation'}`}
+                        description={
+                          <div style={{ fontSize: 12 }}>
+                            <div>From dividend: <Text strong>{formatCurrency(Math.min(reinv, used))}</Text>{addl > 0 ? <> · top-up: <Text strong>{formatCurrency(Math.max(0, used - Math.min(reinv, used)))}</Text></> : null}</div>
+                            {residual > 0.005 && <div><Text type="warning">ETB {residual.toFixed(2)} unused</Text> — doesn't complete another whole share.</div>}
+                            <div><Text type="secondary">Dividend tax is recalculated; the investment is created pending approval.</Text></div>
+                          </div>
+                        }
+                      />
+                    ) : (
+                      <Alert type="info" showIcon style={{ marginBottom: 12 }}
+                        message="Enter a reinvest and/or top-up amount that adds up to at least one whole share." />
+                    )}
+                  </>
+                )}
+              </>
+            );
+          })() : (
+          <>
           <Row gutter={16}>
             <Col span={8}>
               <Form.Item
@@ -679,6 +896,8 @@ export default function Investments() {
               </Form.Item>
             </Col>
           </Row>
+          </>
+          )}
 
           <Form.Item name="remark" label="Remark">
             <Input.TextArea rows={2} />
@@ -686,7 +905,7 @@ export default function Investments() {
 
           <Form.Item style={{ textAlign: 'right', marginBottom: 0 }}>
             <Space>
-              <Button onClick={() => { setModalOpen(false); setSummary(null); setAllocDetailOpen(false); }}>Cancel</Button>
+              <Button onClick={() => { closeInvestmentModal(); }}>Cancel</Button>
               <Button type="primary" htmlType="submit">Record</Button>
             </Space>
           </Form.Item>

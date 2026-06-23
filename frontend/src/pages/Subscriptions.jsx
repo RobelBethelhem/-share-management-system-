@@ -110,11 +110,20 @@ export default function Subscriptions() {
     return { value: s.id, label: `${s.account_no || '—'} / #${s.id} — ${fullName}` };
   };
 
-  // Load the default (unfiltered) shareholder list — the first 50.
-  const loadDefaultShareholders = async () => {
+  // Cache the default (unfiltered) first-50 list so we can reset to it
+  // instantly — on dropdown open and when the search box is cleared —
+  // without a backend call each time.
+  const defaultListRef = useRef([]);
+  const loadDefaultShareholders = async (force = false) => {
+    if (!force && defaultListRef.current.length) {
+      setShareholders(defaultListRef.current);
+      return;
+    }
     try {
       const res = await getShareholders({ page: 1, page_size: 50 });
-      setShareholders((res.data.data || []).map(shareholderOption));
+      const opts = (res.data.data || []).map(shareholderOption);
+      defaultListRef.current = opts;
+      setShareholders(opts);
     } catch { /* ignore */ }
   };
 
@@ -128,7 +137,7 @@ export default function Subscriptions() {
     if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
     const q = (val || '').trim();
     if (!q) {
-      loadDefaultShareholders();
+      loadDefaultShareholders(); // box cleared → show everyone again
       return;
     }
     if (q.length < 2) return; // don't search on a single letter/digit
@@ -140,10 +149,10 @@ export default function Subscriptions() {
     }, 450);
   };
 
-  const handleDropdownOpen = async (open) => {
-    if (open && shareholders.length === 0) {
-      await loadDefaultShareholders();
-    }
+  // Always reset to the full list when the dropdown opens, so a previous
+  // search never lingers — the user can pick anyone or start a fresh search.
+  const handleDropdownOpen = (open) => {
+    if (open) loadDefaultShareholders();
   };
 
   const openModal = (record = null) => {
@@ -425,8 +434,9 @@ export default function Subscriptions() {
         open={modalOpen} onCancel={() => { setModalOpen(false); setEditingRecord(null); }} footer={null} width={600}>
         <Form form={form} layout="vertical" onFinish={handleSubmit}>
           <Form.Item name="shareholder_id" label="Shareholder" rules={[{ required: true }]}>
-            <Select showSearch filterOption={false} onSearch={handleSearch} options={shareholders}
+            <Select showSearch allowClear filterOption={false} onSearch={handleSearch} options={shareholders}
               onDropdownVisibleChange={handleDropdownOpen}
+              onClear={() => loadDefaultShareholders()}
               notFoundContent="Type 2+ characters of a name or account no to search"
               placeholder="Search by name or account no…"
               disabled={!!editingRecord} />

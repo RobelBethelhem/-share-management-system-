@@ -11,6 +11,7 @@ import {
   approveByEntity, rejectByEntity, getBankCapital, searchSubscriptionsAdvanced,
 } from '../services/api';
 import { formatCurrency } from '../utils/format';
+import { formatEthiopianDate } from '../utils/ethiopianDate';
 import AdvancedSearchPanel from '../components/AdvancedSearchPanel';
 
 const { Title } = Typography;
@@ -132,6 +133,7 @@ export default function Subscriptions() {
         share_amount: record.share_amount,
         number_of_shares: record.number_of_shares,
         subscription_date: record.subscription_date ? dayjs(record.subscription_date) : null,
+        amharic_date: record.amharic_date,
         expiry_date: record.expiry_date ? dayjs(record.expiry_date) : null,
         remark: record.remark,
       });
@@ -140,6 +142,14 @@ export default function Subscriptions() {
       form.setFieldValue('par_value', parValue);
     }
     setModalOpen(true);
+  };
+
+  // Auto-fill the Ethiopian (Amharic) date from the Gregorian subscription
+  // date — same behaviour as the Record Investment modal.
+  const handleSubscriptionDateChange = (date) => {
+    if (date) {
+      form.setFieldsValue({ amharic_date: formatEthiopianDate(date.year(), date.month() + 1, date.date()) });
+    }
   };
 
   const handleAmountChange = (val) => {
@@ -436,12 +446,18 @@ export default function Subscriptions() {
             </Col>
           </Row>
           <Row gutter={16}>
-            <Col span={12}>
+            <Col span={8}>
               <Form.Item name="subscription_date" label="Subscription Date">
-                <DatePicker style={{ width: '100%' }} />
+                <DatePicker style={{ width: '100%' }} onChange={handleSubscriptionDateChange} />
               </Form.Item>
             </Col>
-            <Col span={12}>
+            <Col span={8}>
+              <Form.Item name="amharic_date" label="Ethiopian Date (Auto-filled)"
+                tooltip="Auto-converted from the Subscription Date. You can override.">
+                <Input placeholder="Auto-fills from date" />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
               <Form.Item name="expiry_date" label="Expiry Date">
                 <DatePicker style={{ width: '100%' }} />
               </Form.Item>

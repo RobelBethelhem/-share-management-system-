@@ -118,6 +118,7 @@ type Subscription struct {
 	NumberOfShares  int64          `gorm:"not null" json:"number_of_shares"`
 	ParValue        float64        `gorm:"type:decimal(18,2)" json:"par_value"`
 	SubscriptionDate *time.Time    `json:"subscription_date"`
+	AmharicDate     string         `gorm:"size:50" json:"amharic_date"` // Ethiopian date, auto-filled from subscription_date
 	ExpiryDate      *time.Time     `json:"expiry_date"`
 	Status          string         `gorm:"size:30;default:'active'" json:"status"` // active, expired, reversed, extended
 	IsProportional  bool           `gorm:"default:false" json:"is_proportional"`

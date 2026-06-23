@@ -101,13 +101,20 @@ export default function Subscriptions() {
 
   const fetchData = () => { if (activeFilters) fetchAdvanced(activeFilters); else fetchSimple(); };
 
+  // Dropdown label: "<account-no> / #<id> — <full name>", where full name is
+  // first + middle + last. The backend search (case-insensitive) already
+  // matches first/middle/last name and account number.
+  const shareholderOption = (s) => {
+    const fullName = `${s.first_name || ''} ${s.middle_name || ''} ${s.last_name || ''}`
+      .replace(/\s+/g, ' ').trim();
+    return { value: s.id, label: `${s.account_no || '—'} / #${s.id} — ${fullName}` };
+  };
+
   const handleSearch = async (val) => {
     if (!val || val.length < 1) return;
     try {
       const res = await searchShareholders(val);
-      setShareholders((res.data.data || []).map(s => ({
-        value: s.id, label: `${s.account_no} - ${s.first_name} ${s.last_name}`,
-      })));
+      setShareholders((res.data.data || []).map(shareholderOption));
     } catch { setShareholders([]); }
   };
 
@@ -115,9 +122,7 @@ export default function Subscriptions() {
     if (open && shareholders.length === 0) {
       try {
         const res = await getShareholders({ page: 1, page_size: 50 });
-        setShareholders((res.data.data || []).map(s => ({
-          value: s.id, label: `${s.account_no} - ${s.first_name} ${s.last_name}`,
-        })));
+        setShareholders((res.data.data || []).map(shareholderOption));
       } catch { /* ignore */ }
     }
   };

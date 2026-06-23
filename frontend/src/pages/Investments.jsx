@@ -189,7 +189,9 @@ export default function Investments() {
       );
       if (eligible.length === 1) {
         form.setFieldValue('allocation_id', eligible[0].id);
-        handleAllocationSelect(eligible[0].id);
+        // Pass the fresh allocations so selectedAlloc is set immediately
+        // (the `summary` state hasn't updated yet inside this callback).
+        handleAllocationSelect(eligible[0].id, res.data?.allocations);
       }
     } catch { setSummary(null); }
     setSummaryLoading(false);
@@ -233,12 +235,16 @@ export default function Investments() {
     }
   };
 
-  const handleAllocationSelect = (allocId) => {
-    if (!allocId || !summary?.allocations) {
+  // allocs override lets callers (e.g. the auto-select right after fetching
+  // the summary) pass the freshly-loaded allocations, avoiding the stale
+  // `summary` closure that left selectedAlloc null on auto-pick.
+  const handleAllocationSelect = (allocId, allocs) => {
+    const list = allocs || summary?.allocations;
+    if (!allocId || !list) {
       setSelectedAlloc(null);
       return;
     }
-    const alloc = summary.allocations.find(a => a.id === allocId);
+    const alloc = list.find(a => a.id === allocId);
     if (!alloc) {
       setSelectedAlloc(null);
       return;

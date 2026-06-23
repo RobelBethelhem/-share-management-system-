@@ -37,6 +37,21 @@ type liveDividendResult struct {
 	Net            float64 `json:"net"`
 }
 
+// dividendTaxFor returns the tax due on taxableGross for a dividend, honoring
+// its fiscal-year tax grace period: zero while the grace period is active, the
+// scheduled tax once the grace expiry has passed. Centralises the grace rule
+// so the reinvest/collect/reverse recomputes stay consistent with the live
+// dividend view (computeLiveDividend) and with ProcessDividend.
+func dividendTaxFor(dividend models.Dividend, taxableGross float64, schedules []models.DividendTaxSchedule) float64 {
+	var setting models.DividendSetting
+	if err := database.DB.First(&setting, dividend.DividendSettingID).Error; err == nil {
+		if !taxIsActive(setting, time.Now()) {
+			return 0
+		}
+	}
+	return calculateDividendTax(taxableGross, schedules)
+}
+
 func computeLiveDividend(dividend models.Dividend, setting models.DividendSetting) liveDividendResult {
 	daysInYear := float64(setting.DaysInYear)
 	if daysInYear == 0 {
@@ -56,7 +71,8 @@ func computeLiveDividend(dividend models.Dividend, setting models.DividendSettin
 		if inv.PaymentDate == nil {
 			continue
 		}
-		daysHeld := endDate.Sub(*inv.PaymentDate).Hours() / 24
+		// Acquisition day excluded, reference day included (date-only).
+		daysHeld := wholeDaysHeld(*inv.PaymentDate, endDate)
 		if daysHeld < 0 {
 			continue
 		}
@@ -80,7 +96,13 @@ func computeLiveDividend(dividend models.Dividend, setting models.DividendSettin
 	}
 	var taxSchedules []models.DividendTaxSchedule
 	database.DB.Order("min_amount ASC").Find(&taxSchedules)
-	tax := calculateDividendTax(taxableGross, taxSchedules)
+	// Tax is waived during the grace period; it kicks in the day after the
+	// Tax Grace Period Expiry. Checked against the real current date, so the
+	// live amounts start including tax automatically once the grace passes.
+	tax := float64(0)
+	if taxIsActive(setting, time.Now()) {
+		tax = calculateDividendTax(taxableGross, taxSchedules)
+	}
 	net := taxableGross - tax
 	if net < 0 {
 		net = 0
@@ -187,7 +209,7 @@ func ReinvestDividend(c *gin.Context) {
 	if newTaxableGross < 0 {
 		newTaxableGross = 0
 	}
-	newTax := calculateDividendTax(newTaxableGross, taxSchedules)
+	newTax := dividendTaxFor(dividend, newTaxableGross, taxSchedules)
 	newNetDividend := newTaxableGross - newTax
 	newUncollected := newNetDividend - dividend.CollectedAmount
 	if newUncollected < -0.005 {
@@ -273,7 +295,7 @@ func ReinvestDividend(c *gin.Context) {
 		if snappedTaxableGross < 0 {
 			snappedTaxableGross = 0
 		}
-		snappedTax := calculateDividendTax(snappedTaxableGross, taxSchedules)
+		snappedTax := dividendTaxFor(dividend, snappedTaxableGross, taxSchedules)
 		snappedNet := snappedTaxableGross - snappedTax
 		snappedUncollected := snappedNet - dividend.CollectedAmount
 		if snappedUncollected < -0.005 {
@@ -495,7 +517,7 @@ func reinvestWithDistribution(c *gin.Context, dividend *models.Dividend, input *
 	if newTaxable < 0 {
 		newTaxable = 0
 	}
-	newTax := calculateDividendTax(newTaxable, taxSchedules)
+	newTax := dividendTaxFor(*dividend, newTaxable, taxSchedules)
 	newNet := newTaxable - newTax
 	newUncollected := newNet - dividend.CollectedAmount
 	if newUncollected < 0 {
@@ -694,16 +716,12 @@ func GetDividendBreakdown(c *gin.Context) {
 		if inv.PaymentDate == nil {
 			continue
 		}
-		// Days held = end_date − payment_date in WHOLE DAYS.
-		// Use date-only comparison (truncate both to midnight) so a transfer
-		// recorded at 14:00 on the same calendar day as the reference date
-		// gets daysHeld = 0 (and stays visible in the audit trail) instead
-		// of a fractional negative that the old comparison silently skipped.
-		endDay := time.Date(endDate.Year(), endDate.Month(), endDate.Day(),
-			0, 0, 0, 0, endDate.Location())
-		payDay := time.Date(inv.PaymentDate.Year(), inv.PaymentDate.Month(), inv.PaymentDate.Day(),
-			0, 0, 0, 0, inv.PaymentDate.Location())
-		daysHeld := endDay.Sub(payDay).Hours() / 24
+		// Days held = end_date − payment_date in WHOLE DAYS (acquisition day
+		// excluded, reference day included). Date-only so a transfer recorded
+		// at 14:00 on the same calendar day as the reference date gets
+		// daysHeld = 0 (and stays visible in the audit trail) instead of a
+		// fractional negative that the old comparison silently skipped.
+		daysHeld := wholeDaysHeld(*inv.PaymentDate, endDate)
 		if daysHeld < 0 {
 			continue // payment AFTER reference date — doesn't contribute
 		}
@@ -888,7 +906,7 @@ func ReverseDividendReinvestForInvestment(investmentID uint, userID uint) {
 		}
 		var taxSchedules []models.DividendTaxSchedule
 		database.DB.Order("min_amount ASC").Find(&taxSchedules)
-		newTax := calculateDividendTax(newTaxableGross, taxSchedules)
+		newTax := dividendTaxFor(dividend, newTaxableGross, taxSchedules)
 		newNet := newTaxableGross - newTax
 		newUncollected := newNet - dividend.CollectedAmount
 		if newUncollected < 0 {

@@ -21,6 +21,37 @@ func GetDividendSettings(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": settings})
 }
 
+// truncToDay strips the time-of-day from a timestamp so date arithmetic is
+// exact regardless of any hour/minute component a stored value may carry
+// (e.g. a transfer recorded at 14:00). Truncation happens in the value's own
+// location, matching how the dividend breakdown audit view normalises dates.
+func truncToDay(t time.Time) time.Time {
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+}
+
+// wholeDaysHeld returns the whole days a position is held for dividend
+// purposes. The acquisition (payment) day is EXCLUSIVE and the period-end
+// (reference) day is INCLUSIVE: a share acquired today first earns a day
+// tomorrow (today = 0, tomorrow = 1), while the reference date itself still
+// counts. Both inputs are truncated to their calendar date so a time-of-day
+// component never produces a fractional or off-by-one count. The result can
+// be negative when the payment date is after the end date — callers skip
+// those (the share didn't exist yet during the period).
+func wholeDaysHeld(payDate, endDate time.Time) float64 {
+	return truncToDay(endDate).Sub(truncToDay(payDate)).Hours() / 24
+}
+
+// taxIsActive reports whether dividend tax should be applied for a setting as
+// of asOf. Tax is waived during the grace period: when a Tax Grace Period
+// Expiry is set, the expiry date is the last grace day and tax begins only the
+// day AFTER it. With no grace date, tax applies immediately.
+func taxIsActive(setting models.DividendSetting, asOf time.Time) bool {
+	if setting.TaxGracePeriod == nil {
+		return true
+	}
+	return truncToDay(asOf).After(truncToDay(*setting.TaxGracePeriod))
+}
+
 // periodOf returns the effective inclusive [start, end] of a dividend
 // setting. If the setting has no explicit start date (legacy rows), the
 // start is derived from (ReferenceDate − DaysInYear + 1) so an overlap
@@ -100,6 +131,13 @@ func CreateDividendSetting(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "reference_date is required"})
 		return
 	}
+	// Tax grace period expiry, when set, must fall strictly after the reference
+	// (period-end) date — the grace can only push the tax start beyond the year.
+	if setting.TaxGracePeriod != nil &&
+		!truncToDay(*setting.TaxGracePeriod).After(truncToDay(*setting.ReferenceDate)) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Tax grace period expiry must be after the reference date."})
+		return
+	}
 
 	// Fiscal-year name uniqueness (clearer than relying on the DB constraint).
 	var nameConflict int64
@@ -139,15 +177,49 @@ func CreateDividendSetting(c *gin.Context) {
 
 func UpdateDividendSetting(c *gin.Context) {
 	id := c.Param("id")
-	var setting models.DividendSetting
-	if err := database.DB.First(&setting, id).Error; err != nil {
+	var existing models.DividendSetting
+	if err := database.DB.First(&existing, id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Setting not found"})
 		return
 	}
+
+	// Capture pre-edit state for the post-processing lock.
+	wasProcessed := existing.IsProcessed
+	priorGrace := existing.TaxGracePeriod
+
+	// Bind the payload onto a copy of the existing row so we can compare.
+	setting := existing
 	if err := c.ShouldBindJSON(&setting); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	setting.ID = existing.ID
+
+	// Once a fiscal year is PROCESSED it is locked, EXCEPT the tax grace period
+	// expiry — and that only while the existing grace has not yet elapsed. This
+	// lets an admin still push the tax start out (or pull it in) before tax
+	// takes effect, without being able to alter shares/amounts after payout.
+	if wasProcessed {
+		graceElapsed := priorGrace != nil && truncToDay(time.Now()).After(truncToDay(*priorGrace))
+		if graceElapsed {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "This fiscal year is processed and its tax grace period has already elapsed — it can no longer be edited.",
+			})
+			return
+		}
+		newGrace := setting.TaxGracePeriod
+		if newGrace != nil && existing.ReferenceDate != nil &&
+			!truncToDay(*newGrace).After(truncToDay(*existing.ReferenceDate)) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Tax grace period expiry must be after the reference date."})
+			return
+		}
+		// Apply ONLY the tax grace period; everything else stays as processed.
+		existing.TaxGracePeriod = newGrace
+		database.DB.Save(&existing)
+		c.JSON(http.StatusOK, gin.H{"message": "Tax grace period updated", "data": existing})
+		return
+	}
+
 	// Same validations as create, scoped to "any OTHER row".
 	if setting.FiscalYear == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "fiscal_year is required"})
@@ -168,6 +240,11 @@ func UpdateDividendSetting(c *gin.Context) {
 			days = 365
 		}
 		setting.DaysInYear = days
+	}
+	if setting.TaxGracePeriod != nil && setting.ReferenceDate != nil &&
+		!truncToDay(*setting.TaxGracePeriod).After(truncToDay(*setting.ReferenceDate)) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Tax grace period expiry must be after the reference date."})
+		return
 	}
 	if err := validateDividendSettingOverlap(&setting, setting.ID); err != nil {
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
@@ -234,6 +311,13 @@ func ProcessDividend(c *gin.Context) {
 	var taxSchedules []models.DividendTaxSchedule
 	database.DB.Order("min_amount ASC").Find(&taxSchedules)
 
+	now := time.Now()
+	// During the tax grace period, tax is waived (gross == net). Once the
+	// grace expiry passes, the live computation (computeLiveDividend) starts
+	// applying tax automatically, so the displayed/collectable amounts update
+	// without re-processing.
+	taxActive := taxIsActive(setting, now)
+
 	// Generate dividends for each shareholder
 	count := 0
 	for _, w := range weights {
@@ -242,7 +326,10 @@ func ProcessDividend(c *gin.Context) {
 		}
 
 		grossDividend := w.WeightedShares * dps
-		taxAmount := calculateDividendTax(grossDividend, taxSchedules)
+		taxAmount := float64(0)
+		if taxActive {
+			taxAmount = calculateDividendTax(grossDividend, taxSchedules)
+		}
 		netDividend := grossDividend - taxAmount
 
 		dividend := models.Dividend{
@@ -261,7 +348,6 @@ func ProcessDividend(c *gin.Context) {
 		count++
 	}
 
-	now := time.Now()
 	setting.IsProcessed = true
 	setting.ProcessedAt = &now
 	setting.Status = "processed"
@@ -345,10 +431,11 @@ func calculateSharesWithFormula(shareholderID uint, setting models.DividendSetti
 
 	total := float64(0)
 	for _, inv := range investments {
-		// Calculate days_held
+		// Calculate days_held — acquisition day excluded, reference day
+		// included (date-only). See wholeDaysHeld.
 		daysHeld := daysInYear // default: full year if no dates
 		if inv.PaymentDate != nil && setting.ReferenceDate != nil {
-			daysHeld = setting.ReferenceDate.Sub(*inv.PaymentDate).Hours() / 24
+			daysHeld = wholeDaysHeld(*inv.PaymentDate, *setting.ReferenceDate)
 			if daysHeld < 0 {
 				continue // investment made after reference date, skip
 			}

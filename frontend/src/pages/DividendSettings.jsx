@@ -293,6 +293,9 @@ export default function DividendSettings() {
   const [modalOpen, setModalOpen] = useState(false);
   const [taxModalOpen, setTaxModalOpen] = useState(false);
   const [editing, setEditing] = useState(null);
+  // When true the setting modal is opened on a PROCESSED fiscal year and only
+  // the Tax Grace Period Expiry field is editable (the rest is locked).
+  const [graceOnly, setGraceOnly] = useState(false);
   const [editingTax, setEditingTax] = useState(null);
   const [form] = Form.useForm();
   const [taxForm] = Form.useForm();
@@ -323,6 +326,7 @@ export default function DividendSettings() {
         message.success('Created');
       }
       setModalOpen(false);
+      setGraceOnly(false);
       form.resetFields();
       setEditing(null);
       fetchData();
@@ -416,6 +420,7 @@ export default function DividendSettings() {
             <>
               <Button size="small" icon={<EditOutlined />} onClick={() => {
                 setEditing(r);
+                setGraceOnly(false);
                 form.setFieldsValue({
                   ...r,
                   reference_start_date: r.reference_start_date ? dayjs(r.reference_start_date) : null,
@@ -428,6 +433,23 @@ export default function DividendSettings() {
                 <Button size="small" type="primary" icon={<ThunderboltOutlined />}>Process</Button>
               </Popconfirm>
             </>
+          )}
+          {/* After processing the year is locked EXCEPT the tax grace period —
+              and only while that grace date has not yet elapsed. */}
+          {r.is_processed && !(r.tax_grace_period && dayjs().isAfter(dayjs(r.tax_grace_period), 'day')) && (
+            <Tooltip title="Tax is waived until this date; editable until it elapses.">
+              <Button size="small" icon={<EditOutlined />} onClick={() => {
+                setEditing(r);
+                setGraceOnly(true);
+                form.setFieldsValue({
+                  ...r,
+                  reference_start_date: r.reference_start_date ? dayjs(r.reference_start_date) : null,
+                  reference_date: r.reference_date ? dayjs(r.reference_date) : null,
+                  tax_grace_period: r.tax_grace_period ? dayjs(r.tax_grace_period) : null,
+                });
+                setModalOpen(true);
+              }}>Tax Grace</Button>
+            </Tooltip>
           )}
           <Popconfirm
             title={`Delete fiscal year ${r.fiscal_year}?`}
@@ -492,6 +514,7 @@ export default function DividendSettings() {
             <Title level={5} style={{ margin: 0 }}>Fiscal Year Settings</Title>
             <Button type="primary" icon={<PlusOutlined />} onClick={() => {
               setEditing(null);
+              setGraceOnly(false);
               form.resetFields();
               // Suggest the day AFTER the most-recent existing fiscal year's
               // reference_date as the new period's start. Avoids the operator
@@ -620,62 +643,109 @@ export default function DividendSettings() {
       <Tabs items={tabItems} defaultActiveKey="settings" />
 
       {/* Dividend Setting Modal */}
-      <Modal title={editing ? 'Edit Dividend Setting' : 'New Fiscal Year'} open={modalOpen} onCancel={() => setModalOpen(false)} footer={null} width={600}>
+      <Modal
+        title={graceOnly ? 'Edit Tax Grace Period' : (editing ? 'Edit Dividend Setting' : 'New Fiscal Year')}
+        open={modalOpen}
+        onCancel={() => { setModalOpen(false); setGraceOnly(false); }}
+        footer={null}
+        width={600}
+      >
         <Form form={form} layout="vertical" onFinish={handleSubmit} initialValues={{ days_in_year: 365 }}>
-          <Form.Item name="fiscal_year" label="Fiscal Year" rules={[{ required: true }]}>
-            <Input placeholder="e.g. 2023/2024" />
-          </Form.Item>
-          <Row gutter={16}>
-            <Col span={8}>
-              <Form.Item name="reference_start_date" label="Period Start (inclusive)"
-                tooltip="The first day of this dividend's earning period. Used for overlap detection against other fiscal years."
-                rules={[{ required: true, message: 'Pick the period start date' }]}>
-                <DatePicker style={{ width: '100%' }} onChange={recomputeDays} />
+          {graceOnly ? (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message={`Fiscal year ${editing?.fiscal_year || ''} is processed`}
+              description="Only the Tax Grace Period Expiry can be changed, and only while it hasn't elapsed. Tax is waived up to and including this date; from the next day onward, tax is calculated automatically for every dividend in this year."
+            />
+          ) : (
+            <>
+              <Form.Item name="fiscal_year" label="Fiscal Year" rules={[{ required: true }]}>
+                <Input placeholder="e.g. 2023/2024" />
               </Form.Item>
-            </Col>
-            <Col span={8}>
-              <Form.Item name="reference_date" label="Reference Date (end, inclusive)"
-                tooltip="Cut-off date for share calculations — the last day of this dividend's earning period."
-                rules={[{ required: true, message: 'Pick the reference (end) date' }]}>
-                <DatePicker style={{ width: '100%' }} onChange={recomputeDays} />
+              <Row gutter={16}>
+                <Col span={8}>
+                  <Form.Item name="reference_start_date" label="Period Start (inclusive)"
+                    tooltip="The first day of this dividend's earning period. Used for overlap detection against other fiscal years."
+                    rules={[{ required: true, message: 'Pick the period start date' }]}>
+                    <DatePicker style={{ width: '100%' }} onChange={recomputeDays} />
+                  </Form.Item>
+                </Col>
+                <Col span={8}>
+                  <Form.Item name="reference_date" label="Reference Date (end, inclusive)"
+                    tooltip="Cut-off date for share calculations — the last day of this dividend's earning period."
+                    rules={[{ required: true, message: 'Pick the reference (end) date' }]}>
+                    <DatePicker style={{ width: '100%' }} onChange={recomputeDays} />
+                  </Form.Item>
+                </Col>
+                <Col span={8}>
+                  <Form.Item name="days_in_year" label="Days in Period"
+                    tooltip="Auto-computed from start → end (inclusive). Editable — set 366 for a leap year or override for a stub partial year.">
+                    <InputNumber style={{ width: '100%' }} min={1} max={400} />
+                  </Form.Item>
+                </Col>
+              </Row>
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginBottom: 12 }}
+                message="Period validation"
+                description="Two fiscal years cannot cover overlapping days. The system suggests starting the day after the most recent year ended; you can adjust if needed."
+              />
+              <Form.Item name="declared_amount" label="Declared Dividend Amount (Total Pool)" rules={[{ required: true }]}>
+                <InputNumber style={{ width: '100%' }} min={0} formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')} />
               </Form.Item>
-            </Col>
-            <Col span={8}>
-              <Form.Item name="days_in_year" label="Days in Period"
-                tooltip="Auto-computed from start → end (inclusive). Editable — set 366 for a leap year or override for a stub partial year.">
-                <InputNumber style={{ width: '100%' }} min={1} max={400} />
-              </Form.Item>
-            </Col>
-          </Row>
-          <Alert
-            type="info"
-            showIcon
-            style={{ marginBottom: 12 }}
-            message="Period validation"
-            description="Two fiscal years cannot cover overlapping days. The system suggests starting the day after the most recent year ended; you can adjust if needed."
-          />
-          <Form.Item name="declared_amount" label="Declared Dividend Amount (Total Pool)" rules={[{ required: true }]}>
-            <InputNumber style={{ width: '100%' }} min={0} formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')} />
+            </>
+          )}
+          <Form.Item
+            name="tax_grace_period"
+            label="Tax Grace Period Expiry"
+            tooltip="Optional. Tax is waived up to and including this date; tax is calculated from the next day. Must be after the reference (end) date."
+            rules={[{
+              validator: (_, value) => {
+                if (!value) return Promise.resolve();
+                const ref = graceOnly
+                  ? (editing?.reference_date ? dayjs(editing.reference_date) : null)
+                  : form.getFieldValue('reference_date');
+                if (ref && !value.startOf('day').isAfter(dayjs(ref).startOf('day'))) {
+                  return Promise.reject(new Error('Must be after the reference (end) date.'));
+                }
+                return Promise.resolve();
+              },
+            }]}
+          >
+            <DatePicker
+              style={{ width: '100%' }}
+              disabledDate={(current) => {
+                if (!current) return false;
+                const ref = graceOnly
+                  ? (editing?.reference_date ? dayjs(editing.reference_date) : null)
+                  : form.getFieldValue('reference_date');
+                return ref && !current.startOf('day').isAfter(dayjs(ref).startOf('day'));
+              }}
+            />
           </Form.Item>
-          <Form.Item name="tax_grace_period" label="Tax Grace Period Expiry">
-            <DatePicker style={{ width: '100%' }} />
-          </Form.Item>
-          <Alert
-            message="Formulas Used During Processing"
-            type="info" showIcon
-            style={{ marginBottom: 16 }}
-            description={
-              <Text style={{ fontSize: 12 }}>
-                Share calculation and tax formulas are configured globally in the{' '}
-                <Text strong>"Share Calculation"</Text> and <Text strong>"Tax Formula"</Text> tabs.
-                Change them before processing if needed.
-              </Text>
-            }
-          />
+          {!graceOnly && (
+            <Alert
+              message="Formulas Used During Processing"
+              type="info" showIcon
+              style={{ marginBottom: 16 }}
+              description={
+                <Text style={{ fontSize: 12 }}>
+                  Share calculation and tax formulas are configured globally in the{' '}
+                  <Text strong>"Share Calculation"</Text> and <Text strong>"Tax Formula"</Text> tabs.
+                  Change them before processing if needed.
+                </Text>
+              }
+            />
+          )}
           <Form.Item style={{ textAlign: 'right', marginBottom: 0 }}>
             <Space>
-              <Button onClick={() => setModalOpen(false)}>Cancel</Button>
-              <Button type="primary" htmlType="submit">{editing ? 'Update' : 'Create'}</Button>
+              <Button onClick={() => { setModalOpen(false); setGraceOnly(false); }}>Cancel</Button>
+              <Button type="primary" htmlType="submit">
+                {graceOnly ? 'Update Grace Period' : (editing ? 'Update' : 'Create')}
+              </Button>
             </Space>
           </Form.Item>
         </Form>

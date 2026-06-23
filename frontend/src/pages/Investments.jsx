@@ -781,6 +781,36 @@ export default function Investments() {
                         </Form.Item>
                       </Col>
                     </Row>
+                    {/* Computed, read-only: whole shares the funds buy and the
+                        exact amount used (floor of (reinvest + top-up) ÷ par). */}
+                    <Row gutter={16}>
+                      <Col span={8}>
+                        <Form.Item label={
+                          <Space size={4}>
+                            <span>Number of Shares</span>
+                            {selectedAlloc && (
+                              <Tag color={overCap ? 'red' : 'blue'} style={{ fontSize: 10 }}>
+                                max {allocCap.toLocaleString()}
+                              </Tag>
+                            )}
+                          </Space>
+                        } tooltip="Whole shares this reinvest + top-up will pay down on the allocation (floor of total ÷ par value).">
+                          <InputNumber style={{ width: '100%' }} value={shares} disabled
+                            status={overCap ? 'error' : ''} />
+                        </Form.Item>
+                      </Col>
+                      <Col span={8}>
+                        <Form.Item label="Amount Used (ETB)" tooltip="Number of shares × par value — what's actually applied.">
+                          <InputNumber style={{ width: '100%' }} value={used} disabled
+                            formatter={(v) => v ? `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',') : '0'} />
+                        </Form.Item>
+                      </Col>
+                      <Col span={8}>
+                        <Form.Item label="Par Value">
+                          <InputNumber style={{ width: '100%' }} value={parValue} disabled />
+                        </Form.Item>
+                      </Col>
+                    </Row>
                     {shares > 0 ? (
                       <Alert
                         type={overCap ? 'error' : residual > 0.005 ? 'warning' : 'success'}

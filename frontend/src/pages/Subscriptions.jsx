@@ -118,22 +118,26 @@ export default function Subscriptions() {
     } catch { /* ignore */ }
   };
 
-  // Track the current search text; only hit the backend on Enter (not on
-  // every keystroke — that hammered the server). Clearing the box restores
-  // the full default list instead of leaving the stale filtered results.
-  const shSearchTextRef = useRef('');
+  // Debounced search so the backend isn't hit on every keystroke (AntD v6's
+  // Select has no key-down hook, so an Enter-only trigger isn't possible).
+  // Rules: ignore a single character; for 2+ chars query once the operator
+  // pauses (~450ms); clearing the box restores the full default list rather
+  // than leaving stale filtered results.
+  const searchTimerRef = useRef(null);
   const handleSearch = (val) => {
-    shSearchTextRef.current = val;
-    if (!val) loadDefaultShareholders();
-  };
-
-  const runShareholderSearch = async () => {
-    const val = (shSearchTextRef.current || '').trim();
-    if (!val) { loadDefaultShareholders(); return; }
-    try {
-      const res = await searchShareholders(val);
-      setShareholders((res.data.data || []).map(shareholderOption));
-    } catch { setShareholders([]); }
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    const q = (val || '').trim();
+    if (!q) {
+      loadDefaultShareholders();
+      return;
+    }
+    if (q.length < 2) return; // don't search on a single letter/digit
+    searchTimerRef.current = setTimeout(async () => {
+      try {
+        const res = await searchShareholders(q);
+        setShareholders((res.data.data || []).map(shareholderOption));
+      } catch { setShareholders([]); }
+    }, 450);
   };
 
   const handleDropdownOpen = async (open) => {
@@ -423,12 +427,8 @@ export default function Subscriptions() {
           <Form.Item name="shareholder_id" label="Shareholder" rules={[{ required: true }]}>
             <Select showSearch filterOption={false} onSearch={handleSearch} options={shareholders}
               onDropdownVisibleChange={handleDropdownOpen}
-              defaultActiveFirstOption={false}
-              onInputKeyDown={(e) => {
-                if (e.key === 'Enter') { e.preventDefault(); runShareholderSearch(); }
-              }}
-              notFoundContent="Type a name or account, then press Enter to search"
-              placeholder="Type a name/account no, press Enter to search"
+              notFoundContent="Type 2+ characters of a name or account no to search"
+              placeholder="Search by name or account no…"
               disabled={!!editingRecord} />
           </Form.Item>
           <Row gutter={16}>

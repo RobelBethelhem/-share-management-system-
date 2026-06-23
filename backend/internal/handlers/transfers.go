@@ -124,6 +124,12 @@ func CreateTransfer(c *gin.Context) {
 		return
 	}
 
+	// A shareholder cannot transfer shares to himself.
+	if input.TransferorID == input.TransfereeID {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Transferor and transferee cannot be the same shareholder"})
+		return
+	}
+
 	// === MULTI-LINE PATH ===
 	if len(input.Lines) > 0 {
 		totalPaid, totalUnpaid := int64(0), int64(0)

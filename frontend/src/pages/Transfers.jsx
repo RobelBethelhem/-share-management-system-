@@ -85,6 +85,13 @@ export default function Transfers() {
   // Stable ref for field key → index mapping (needed in handleLineModeChange)
   const fieldKeysRef = useRef([]);
 
+  // Transferor allocations/blocks detail modal (kept out of the form by default).
+  const [transferorDetailOpen, setTransferorDetailOpen] = useState(false);
+
+  // Watch the two party ids so each Select can exclude the other party.
+  const watchedTransferor = Form.useWatch('transferor_id', form);
+  const watchedTransferee = Form.useWatch('transferee_id', form);
+
   // Fetch par value from bank capital settings
   useEffect(() => {
     getBankCapital().then(res => {
@@ -129,25 +136,45 @@ export default function Transfers() {
 
   const fetchData = () => { if (activeFilters) fetchAdvanced(activeFilters); else fetchSimple(); };
 
-  const handleShareholderSearch = async (val) => {
-    if (!val || val.length < 1) return;
-    try {
-      const res = await searchShareholders(val);
-      setShareholders((res.data.data || []).map(s => ({
-        value: s.id, label: `${s.account_no} - ${s.first_name} ${s.last_name}`,
-      })));
-    } catch { setShareholders([]); }
+  // Dropdown label: "<account-no> / #<id> — <full name>" (first+middle+last).
+  // Backend quick-search matches name, account no, AND shareholder id.
+  const shareholderOption = (s) => {
+    const fullName = `${s.first_name || ''} ${s.middle_name || ''} ${s.last_name || ''}`
+      .replace(/\s+/g, ' ').trim();
+    return { value: s.id, label: `${s.account_no || '—'} / #${s.id} — ${fullName}` };
   };
 
-  const handleDropdownOpen = async (open) => {
-    if (open && shareholders.length === 0) {
+  // Cache the default first-50 list so reset (on open / on clear) is instant.
+  const defaultShListRef = useRef([]);
+  const loadDefaultShareholders = async () => {
+    if (defaultShListRef.current.length) { setShareholders(defaultShListRef.current); return; }
+    try {
+      const res = await getShareholders({ page: 1, page_size: 50 });
+      const opts = (res.data.data || []).map(shareholderOption);
+      defaultShListRef.current = opts;
+      setShareholders(opts);
+    } catch { /* ignore */ }
+  };
+
+  // Debounced search (no per-keystroke calls; single char ignored; clearing
+  // restores the full list — AntD v6 Select has no Enter hook).
+  const shSearchTimerRef = useRef(null);
+  const handleShareholderSearch = (val) => {
+    if (shSearchTimerRef.current) clearTimeout(shSearchTimerRef.current);
+    const q = (val || '').trim();
+    if (!q) { loadDefaultShareholders(); return; }
+    if (q.length < 2) return;
+    shSearchTimerRef.current = setTimeout(async () => {
       try {
-        const res = await getShareholders({ page: 1, page_size: 50 });
-        setShareholders((res.data.data || []).map(s => ({
-          value: s.id, label: `${s.account_no} - ${s.first_name} ${s.last_name}`,
-        })));
-      } catch { /* ignore */ }
-    }
+        const res = await searchShareholders(q);
+        setShareholders((res.data.data || []).map(shareholderOption));
+      } catch { setShareholders([]); }
+    }, 450);
+  };
+
+  // Reset to the full list on open so a previous search never lingers.
+  const handleDropdownOpen = (open) => {
+    if (open) loadDefaultShareholders();
   };
 
   const resetLineState = () => {
@@ -204,6 +231,7 @@ export default function Transfers() {
   const handleTransferorChange = async (shareholderId) => {
     setTransferorSummary(null);
     setTransferorBlocks([]);
+    setTransferorDetailOpen(false);
     resetLineState();
     setAllocTransfers({});
     form.setFieldValue('lines', [{}]);
@@ -612,22 +640,26 @@ export default function Transfers() {
           <Row gutter={16}>
             <Col span={12}>
               <Form.Item name="transferor_id" label="Transferor (From)" rules={[{ required: true }]}>
-                <Select showSearch filterOption={false}
+                <Select showSearch allowClear filterOption={false}
                   onSearch={handleShareholderSearch}
                   onDropdownVisibleChange={handleDropdownOpen}
                   onChange={handleTransferorChange}
-                  options={shareholders}
-                  placeholder="Search transferor..." />
+                  onClear={() => loadDefaultShareholders()}
+                  options={shareholders.filter(o => o.value !== watchedTransferee)}
+                  notFoundContent="Type 2+ chars of a name, account no, or ID"
+                  placeholder="Search by name, account no, or ID…" />
               </Form.Item>
             </Col>
             <Col span={12}>
               <Form.Item name="transferee_id" label="Transferee (To)" rules={[{ required: true }]}>
-                <Select showSearch filterOption={false}
+                <Select showSearch allowClear filterOption={false}
                   onSearch={handleShareholderSearch}
                   onDropdownVisibleChange={handleDropdownOpen}
                   onChange={handleTransfereeChange}
-                  options={shareholders}
-                  placeholder="Search transferee..." />
+                  onClear={() => loadDefaultShareholders()}
+                  options={shareholders.filter(o => o.value !== watchedTransferor)}
+                  notFoundContent="Type 2+ chars of a name, account no, or ID"
+                  placeholder="Search by name, account no, or ID…" />
               </Form.Item>
             </Col>
           </Row>
@@ -685,74 +717,20 @@ export default function Transfers() {
                 </Col>
               </Row>
 
-              {/* Allocations & Blocks section */}
+              {/* Allocations & Blocks — behind a detail button (a shareholder may have many allocations) */}
               {(transferorSummary.allocations?.length > 0 || transferorBlocks.length > 0) && (
                 <>
                   <Divider style={{ margin: '8px 0' }} />
-                  <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>
-                    ALLOCATIONS &amp; PAYMENT STATUS
-                  </Text>
-
-                  {transferorSummary.allocations?.length > 0 && (
-                    <Table
-                      dataSource={transferorSummary.allocations}
-                      columns={allocColumns}
-                      rowKey="id"
-                      size="small"
-                      pagination={false}
-                      style={{ fontSize: 12 }}
-                      expandable={{
-                        expandedRowRender: (alloc) => {
-                          const state = allocTransfers[alloc.id] || {};
-                          return (
-                            <div style={{ padding: '8px 0' }}>
-                              <Table
-                                dataSource={state.data || []}
-                                columns={allocTransferHistoryCols}
-                                loading={state.loading}
-                                rowKey="id"
-                                size="small"
-                                pagination={{
-                                  size: 'small',
-                                  current: state.page || 1,
-                                  total: state.total || 0,
-                                  pageSize: 5,
-                                  onChange: (p) => loadAllocTransfers(alloc.id, p),
-                                  showTotal: t => `${t} transfers`,
-                                }}
-                                locale={{ emptyText: 'No transfers from this allocation' }}
-                              />
-                            </div>
-                          );
-                        },
-                        onExpand: (expanded, alloc) => {
-                          if (expanded && !allocTransfers[alloc.id]) {
-                            loadAllocTransfers(alloc.id);
-                          }
-                        },
-                      }}
-                    />
-                  )}
-
-                  {transferorBlocks.length > 0 && (
-                    <>
-                      <Divider style={{ margin: '8px 0' }} />
-                      <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>
-                        ACTIVE SHARE BLOCKS
-                        <Text type="secondary" style={{ fontSize: 11, marginLeft: 8 }}>
-                          — blocks without a linked allocation show "Not linked"
-                        </Text>
-                      </Text>
-                      <Table
-                        dataSource={transferorBlocks}
-                        columns={blockColumns}
-                        rowKey="id"
-                        size="small"
-                        pagination={false}
-                        style={{ fontSize: 12 }}
-                      />
-                    </>
-                  )}
+                  <Button
+                    type="link"
+                    size="small"
+                    style={{ padding: 0 }}
+                    onClick={() => setTransferorDetailOpen(true)}
+                  >
+                    View allocations &amp; payment status
+                    {transferorSummary.allocations?.length > 0 && ` (${transferorSummary.allocations.length})`}
+                    {transferorBlocks.length > 0 && ` · ${transferorBlocks.length} block${transferorBlocks.length > 1 ? 's' : ''}`}
+                  </Button>
                 </>
               )}
             </Card>
@@ -1180,6 +1158,7 @@ export default function Transfers() {
                 setModalOpen(false);
                 setTransferorSummary(null);
                 setTransferorBlocks([]);
+                setTransferorDetailOpen(false);
                 resetLineState();
                 resetDestState();
                 setAllocTransfers({});
@@ -1190,6 +1169,81 @@ export default function Transfers() {
             </Space>
           </Form.Item>
         </Form>
+      </Modal>
+
+      {/* Transferor allocations & blocks — detail modal */}
+      <Modal
+        title={transferorSummary ? `${transferorSummary.shareholder?.first_name || ''} ${transferorSummary.shareholder?.last_name || ''} — Allocations & Payment Status` : 'Allocations & Payment Status'}
+        open={transferorDetailOpen}
+        onCancel={() => setTransferorDetailOpen(false)}
+        footer={null}
+        width={900}
+      >
+        {transferorSummary?.allocations?.length > 0 && (
+          <>
+            <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>
+              ALLOCATIONS &amp; PAYMENT STATUS
+            </Text>
+            <Table
+              dataSource={transferorSummary.allocations}
+              columns={allocColumns}
+              rowKey="id"
+              size="small"
+              pagination={false}
+              style={{ fontSize: 12 }}
+              expandable={{
+                expandedRowRender: (alloc) => {
+                  const state = allocTransfers[alloc.id] || {};
+                  return (
+                    <div style={{ padding: '8px 0' }}>
+                      <Table
+                        dataSource={state.data || []}
+                        columns={allocTransferHistoryCols}
+                        loading={state.loading}
+                        rowKey="id"
+                        size="small"
+                        pagination={{
+                          size: 'small',
+                          current: state.page || 1,
+                          total: state.total || 0,
+                          pageSize: 5,
+                          onChange: (p) => loadAllocTransfers(alloc.id, p),
+                          showTotal: t => `${t} transfers`,
+                        }}
+                        locale={{ emptyText: 'No transfers from this allocation' }}
+                      />
+                    </div>
+                  );
+                },
+                onExpand: (expanded, alloc) => {
+                  if (expanded && !allocTransfers[alloc.id]) {
+                    loadAllocTransfers(alloc.id);
+                  }
+                },
+              }}
+            />
+          </>
+        )}
+
+        {transferorBlocks.length > 0 && (
+          <>
+            <Divider style={{ margin: '12px 0' }} />
+            <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>
+              ACTIVE SHARE BLOCKS
+              <Text type="secondary" style={{ fontSize: 11, marginLeft: 8 }}>
+                — blocks without a linked allocation show "Not linked"
+              </Text>
+            </Text>
+            <Table
+              dataSource={transferorBlocks}
+              columns={blockColumns}
+              rowKey="id"
+              size="small"
+              pagination={false}
+              style={{ fontSize: 12 }}
+            />
+          </>
+        )}
       </Modal>
     </div>
   );

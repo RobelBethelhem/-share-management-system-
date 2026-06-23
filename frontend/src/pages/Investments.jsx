@@ -62,6 +62,7 @@ export default function Investments() {
   const [summary, setSummary] = useState(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [selectedAlloc, setSelectedAlloc] = useState(null); // for cap validation
+  const [allocDetailOpen, setAllocDetailOpen] = useState(false); // per-allocation detail modal
   const [form] = Form.useForm();
   const lastChanged = useRef(null);
 
@@ -111,25 +112,48 @@ export default function Investments() {
   // alias kept so existing handlers (created on submit, etc.) still work
   const fetchData = () => { if (activeFilters) fetchAdvanced(activeFilters); else fetchSimple(); };
 
-  const handleShareholderSearch = async (val) => {
-    if (!val || val.length < 1) return;
-    try {
-      const res = await searchShareholders(val);
-      setShareholders((res.data.data || []).map(s => ({
-        value: s.id, label: `${s.account_no} - ${s.first_name} ${s.last_name}`,
-      })));
-    } catch { setShareholders([]); }
+  // Dropdown label: "<account-no> / #<id> — <full name>". Backend search
+  // matches first/middle/last name, account no, AND shareholder id.
+  const shareholderOption = (s) => {
+    const fullName = `${s.first_name || ''} ${s.middle_name || ''} ${s.last_name || ''}`
+      .replace(/\s+/g, ' ').trim();
+    return { value: s.id, label: `${s.account_no || '—'} / #${s.id} — ${fullName}` };
   };
 
-  const handleDropdownOpen = async (open) => {
-    if (open && shareholders.length === 0) {
-      try {
-        const res = await getShareholders({ page: 1, page_size: 50 });
-        setShareholders((res.data.data || []).map(s => ({
-          value: s.id, label: `${s.account_no} - ${s.first_name} ${s.last_name}`,
-        })));
-      } catch { /* ignore */ }
+  // Cache the default first-50 list so reset (on open / on clear) is instant.
+  const defaultShListRef = useRef([]);
+  const loadDefaultShareholders = async (force = false) => {
+    if (!force && defaultShListRef.current.length) {
+      setShareholders(defaultShListRef.current);
+      return;
     }
+    try {
+      const res = await getShareholders({ page: 1, page_size: 50 });
+      const opts = (res.data.data || []).map(shareholderOption);
+      defaultShListRef.current = opts;
+      setShareholders(opts);
+    } catch { /* ignore */ }
+  };
+
+  // Debounced search — no backend call per keystroke; single char ignored;
+  // clearing restores the full list (AntD v6 Select has no Enter hook).
+  const shSearchTimerRef = useRef(null);
+  const handleShareholderSearch = (val) => {
+    if (shSearchTimerRef.current) clearTimeout(shSearchTimerRef.current);
+    const q = (val || '').trim();
+    if (!q) { loadDefaultShareholders(); return; }
+    if (q.length < 2) return;
+    shSearchTimerRef.current = setTimeout(async () => {
+      try {
+        const res = await searchShareholders(q);
+        setShareholders((res.data.data || []).map(shareholderOption));
+      } catch { setShareholders([]); }
+    }, 450);
+  };
+
+  // Always reset to the full list on open so a previous search never lingers.
+  const handleDropdownOpen = (open) => {
+    if (open) loadDefaultShareholders();
   };
 
   const handleShareholderSelect = async (shId) => {
@@ -393,19 +417,21 @@ export default function Investments() {
         scroll={{ x: 1400 }} />
 
       {/* Create Modal */}
-      <Modal title="Record Investment" open={modalOpen} onCancel={() => { setModalOpen(false); setSummary(null); }}
+      <Modal title="Record Investment" open={modalOpen} onCancel={() => { setModalOpen(false); setSummary(null); setAllocDetailOpen(false); }}
         footer={null} width={780}>
         <Form form={form} layout="vertical" onFinish={handleSubmit}>
 
           {/* Shareholder selector */}
           <Form.Item name="shareholder_id" label="Shareholder" rules={[{ required: true }]}>
             <Select
-              showSearch filterOption={false}
+              showSearch allowClear filterOption={false}
               onSearch={handleShareholderSearch}
               options={shareholders}
               onDropdownVisibleChange={handleDropdownOpen}
               onChange={handleShareholderSelect}
-              placeholder="Search shareholder..."
+              onClear={() => loadDefaultShareholders()}
+              notFoundContent="Type 2+ characters of a name, account no, or ID to search"
+              placeholder="Search by name, account no, or ID…"
             />
           </Form.Item>
 
@@ -452,15 +478,16 @@ export default function Investments() {
               {summary.allocations?.length > 0 && (
                 <>
                   <Divider style={{ margin: '8px 0' }} />
-                  <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>ALLOCATIONS</Text>
-                  <Table
-                    dataSource={summary.allocations}
-                    columns={allocColumns}
-                    rowKey="id"
-                    size="small"
-                    pagination={false}
-                    style={{ fontSize: 12 }}
-                  />
+                  <Row justify="space-between" align="middle">
+                    <Text type="secondary" style={{ fontSize: 11 }}>
+                      {summary.allocations.length} allocation{summary.allocations.length === 1 ? '' : 's'}
+                    </Text>
+                    {/* Per-allocation breakdown lives in a modal so a shareholder
+                        with many allocations doesn't bloat the form. */}
+                    <Button size="small" onClick={() => setAllocDetailOpen(true)}>
+                      View allocation detail
+                    </Button>
+                  </Row>
                 </>
               )}
             </Card>
@@ -659,11 +686,31 @@ export default function Investments() {
 
           <Form.Item style={{ textAlign: 'right', marginBottom: 0 }}>
             <Space>
-              <Button onClick={() => { setModalOpen(false); setSummary(null); }}>Cancel</Button>
+              <Button onClick={() => { setModalOpen(false); setSummary(null); setAllocDetailOpen(false); }}>Cancel</Button>
               <Button type="primary" htmlType="submit">Record</Button>
             </Space>
           </Form.Item>
         </Form>
+      </Modal>
+
+      {/* Per-allocation detail — opened from the summary card. Paginated so a
+          shareholder with many (e.g. 100) allocations stays manageable. */}
+      <Modal
+        title={`Allocation Detail${summary?.shareholder ? ` — ${summary.shareholder.first_name || ''} ${summary.shareholder.last_name || ''}`.replace(/\s+$/, '') : ''}`}
+        open={allocDetailOpen}
+        onCancel={() => setAllocDetailOpen(false)}
+        footer={<Button onClick={() => setAllocDetailOpen(false)}>Close</Button>}
+        width={900}
+      >
+        <Table
+          dataSource={summary?.allocations || []}
+          columns={allocColumns}
+          rowKey="id"
+          size="small"
+          pagination={{ pageSize: 10, showSizeChanger: true, pageSizeOptions: [10, 20, 50],
+            showTotal: (t) => `${t} allocation${t === 1 ? '' : 's'}` }}
+          scroll={{ x: 700 }}
+        />
       </Modal>
     </div>
   );

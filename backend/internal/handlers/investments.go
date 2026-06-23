@@ -328,6 +328,15 @@ func CreateInvestment(c *gin.Context) {
 		return
 	}
 
+	// Payment date is the dividend-eligibility clock for this holding: the
+	// share starts earning the day AFTER it (today = 0, tomorrow = 1). It must
+	// be known, otherwise the weighted-average day count is undefined — reject
+	// rather than silently assume a full year.
+	if inv.PaymentDate == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "payment_date is required"})
+		return
+	}
+
 	// Check for double payment (same shareholder, same date, same amount)
 	var exists int64
 	database.DB.Model(&models.Investment{}).

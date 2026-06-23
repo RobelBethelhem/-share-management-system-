@@ -110,8 +110,26 @@ export default function Subscriptions() {
     return { value: s.id, label: `${s.account_no || '—'} / #${s.id} — ${fullName}` };
   };
 
-  const handleSearch = async (val) => {
-    if (!val || val.length < 1) return;
+  // Load the default (unfiltered) shareholder list — the first 50.
+  const loadDefaultShareholders = async () => {
+    try {
+      const res = await getShareholders({ page: 1, page_size: 50 });
+      setShareholders((res.data.data || []).map(shareholderOption));
+    } catch { /* ignore */ }
+  };
+
+  // Track the current search text; only hit the backend on Enter (not on
+  // every keystroke — that hammered the server). Clearing the box restores
+  // the full default list instead of leaving the stale filtered results.
+  const shSearchTextRef = useRef('');
+  const handleSearch = (val) => {
+    shSearchTextRef.current = val;
+    if (!val) loadDefaultShareholders();
+  };
+
+  const runShareholderSearch = async () => {
+    const val = (shSearchTextRef.current || '').trim();
+    if (!val) { loadDefaultShareholders(); return; }
     try {
       const res = await searchShareholders(val);
       setShareholders((res.data.data || []).map(shareholderOption));
@@ -120,10 +138,7 @@ export default function Subscriptions() {
 
   const handleDropdownOpen = async (open) => {
     if (open && shareholders.length === 0) {
-      try {
-        const res = await getShareholders({ page: 1, page_size: 50 });
-        setShareholders((res.data.data || []).map(shareholderOption));
-      } catch { /* ignore */ }
+      await loadDefaultShareholders();
     }
   };
 
@@ -408,7 +423,13 @@ export default function Subscriptions() {
           <Form.Item name="shareholder_id" label="Shareholder" rules={[{ required: true }]}>
             <Select showSearch filterOption={false} onSearch={handleSearch} options={shareholders}
               onDropdownVisibleChange={handleDropdownOpen}
-              placeholder="Search shareholder..." disabled={!!editingRecord} />
+              defaultActiveFirstOption={false}
+              onInputKeyDown={(e) => {
+                if (e.key === 'Enter') { e.preventDefault(); runShareholderSearch(); }
+              }}
+              notFoundContent="Type a name or account, then press Enter to search"
+              placeholder="Type a name/account no, press Enter to search"
+              disabled={!!editingRecord} />
           </Form.Item>
           <Row gutter={16}>
             <Col span={12}>

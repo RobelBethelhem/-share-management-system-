@@ -354,12 +354,27 @@ func SearchShareholders(c *gin.Context) {
 	}
 	// Case-insensitive: lowercase both the query and the columns. TiDB's
 	// default collation (utf8mb4_bin) is case-sensitive, so a plain LIKE
-	// wouldn't match "john" against "John". Also search middle_name.
+	// wouldn't match "john" against "John". Search first/middle/last name,
+	// account no, AND the shareholder ID.
 	like := "%" + strings.ToLower(q) + "%"
+	conds := "LOWER(first_name) LIKE ? OR LOWER(middle_name) LIKE ? OR LOWER(last_name) LIKE ? OR LOWER(account_no) LIKE ?"
+	args := []interface{}{like, like, like, like}
+
+	// Shareholder-ID match: pull just the digits from the query (so "#2030001"
+	// or "2030001" both work) and match against the id cast to text.
+	var digits strings.Builder
+	for _, r := range q {
+		if r >= '0' && r <= '9' {
+			digits.WriteRune(r)
+		}
+	}
+	if d := digits.String(); d != "" {
+		conds += " OR CAST(id AS CHAR) LIKE ?"
+		args = append(args, "%"+d+"%")
+	}
+
 	var shareholders []models.Shareholder
-	database.DB.Where(
-		"LOWER(first_name) LIKE ? OR LOWER(middle_name) LIKE ? OR LOWER(last_name) LIKE ? OR LOWER(account_no) LIKE ?",
-		like, like, like, like).
+	database.DB.Where(conds, args...).
 		Limit(20).Find(&shareholders)
 	c.JSON(http.StatusOK, gin.H{"data": shareholders})
 }

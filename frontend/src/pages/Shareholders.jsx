@@ -30,7 +30,7 @@ const SH_FIELDS = [
   { key: 'national_id_no',     label: 'National ID',            type: 'string' },
   { key: 'passport_no',        label: 'Passport No',            type: 'string' },
   { key: 'shareholder_type',   label: 'Type',                   type: 'enum', options: shareholderTypes },
-  { key: 'gender',             label: 'Gender',                 type: 'enum', options: [{value:'male',label:'Male'},{value:'female',label:'Female'}] },
+  { key: 'gender',             label: 'Gender',                 type: 'enum', options: [{value:'Male',label:'Male'},{value:'Female',label:'Female'},{value:'Other',label:'Other'}] },
   { key: 'status',             label: 'Status',                 type: 'enum', options: [{value:'active',label:'Active'},{value:'dormant',label:'Dormant'}] },
   { key: 'nationality',        label: 'Nationality',            type: 'string' },
   { key: 'phone',              label: 'Phone',                  type: 'string' },
@@ -58,6 +58,22 @@ export default function Shareholders() {
   const [editing, setEditing] = useState(null);
   const [form] = Form.useForm();
   const navigate = useNavigate();
+
+  // Gender depends on shareholder type: only Male/Female apply to an
+  // Individual; every other type (Joint, Corporate, Association, Economic) is a
+  // non-person entity, so its gender is "Other". Watch the type and keep the
+  // gender field in sync (also fixes legacy non-individual rows on edit-load).
+  const watchedType = Form.useWatch('shareholder_type', form);
+  const isNonIndividual = !!watchedType && watchedType.toLowerCase() !== 'individual';
+  useEffect(() => {
+    if (!watchedType) return;
+    const g = form.getFieldValue('gender');
+    if (isNonIndividual) {
+      if (g !== 'Other') form.setFieldValue('gender', 'Other');
+    } else if (g === 'Other') {
+      form.setFieldValue('gender', undefined);
+    }
+  }, [watchedType]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Advanced search: activeFilters is non-null when a search is in effect.
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -357,8 +373,17 @@ export default function Shareholders() {
                   </Row>
                   <Row gutter={16}>
                     <Col span={6}>
-                      <Form.Item name="gender" label="Gender">
-                        <Select options={[{ value: 'Male' }, { value: 'Female' }]} />
+                      <Form.Item
+                        name="gender"
+                        label="Gender"
+                        tooltip={isNonIndividual ? 'Non-individual shareholders are recorded as "Other".' : undefined}
+                      >
+                        <Select
+                          disabled={isNonIndividual}
+                          options={isNonIndividual
+                            ? [{ value: 'Other', label: 'Other' }]
+                            : [{ value: 'Male', label: 'Male' }, { value: 'Female', label: 'Female' }]}
+                        />
                       </Form.Item>
                     </Col>
                     <Col span={6}>

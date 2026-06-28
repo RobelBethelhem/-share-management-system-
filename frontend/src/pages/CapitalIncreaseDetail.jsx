@@ -10,8 +10,9 @@ import {
 } from '@ant-design/icons';
 import {
   getCapitalIncrease, getCISummary, getCISubscriptions, startCapitalIncrease,
-  previewCIRound, runCIRound, confirmCISubscription, reverseCISubscription, closeCIRound,
+  previewCIRound, runCIRound, confirmCISubscription, closeCIRound,
   openCIAdditional, closeCapitalIncrease,
+  // reverseCISubscription, // Reverse temporarily disabled — see Actions column / reverseRow below
 } from '../services/api';
 import { formatNumber } from '../utils/format';
 
@@ -233,18 +234,23 @@ export default function CapitalIncreaseDetail() {
     }
   };
 
+  // Reverse temporarily disabled: once a pre-subscription is confirmed/
+  // declined/expired it can no longer be reversed. Kept here (commented out)
+  // so we can re-enable it later without rewriting. Restoring this handler,
+  // the reverseCISubscription import, and the Popconfirm in the Actions column
+  // brings the feature back as-is.
   // Reverse: undo a confirm/decline so the pre-sub can be re-confirmed.
   // Drops the linked confirmation+allocation, deletes round-local
   // unfulfilled additional requests, and replays FIFO fulfillment.
-  const reverseRow = async (row) => {
-    try {
-      await reverseCISubscription(id, row.id);
-      message.success('Reversed — the pre-subscription is active again');
-      fetchAll();
-    } catch (err) {
-      message.error(err.response?.data?.error || 'Failed');
-    }
-  };
+  // const reverseRow = async (row) => {
+  //   try {
+  //     await reverseCISubscription(id, row.id);
+  //     message.success('Reversed — the pre-subscription is active again');
+  //     fetchAll();
+  //   } catch (err) {
+  //     message.error(err.response?.data?.error || 'Failed');
+  //   }
+  // };
 
   const handleCloseRound = async (round) => {
     try {
@@ -369,17 +375,21 @@ export default function CapitalIncreaseDetail() {
           const conf = confirmByShID[r.shareholder_id];
           const acted = !!conf || r.status === 'expired' || r.status === 'declined' || !!r.shareholder_confirmed_at;
           if (acted) {
-            return (
-              <Popconfirm
-                title="Reverse this action?"
-                description="Deletes the confirmation/allocation, removes unfulfilled additional requests created during this round, and resets the pre-subscription so you can confirm again."
-                okText="Reverse"
-                okButtonProps={{ danger: true }}
-                onConfirm={() => reverseRow(r)}
-              >
-                <Button size="small" type="link" danger>Reverse</Button>
-              </Popconfirm>
-            );
+            // Reverse temporarily disabled — once a pre-subscription has been
+            // confirmed/declined/expired there is no action to take. Restore
+            // the Popconfirm below (and reverseRow + its import) to re-enable.
+            // return (
+            //   <Popconfirm
+            //     title="Reverse this action?"
+            //     description="Deletes the confirmation/allocation, removes unfulfilled additional requests created during this round, and resets the pre-subscription so you can confirm again."
+            //     okText="Reverse"
+            //     okButtonProps={{ danger: true }}
+            //     onConfirm={() => reverseRow(r)}
+            //   >
+            //     <Button size="small" type="link" danger>Reverse</Button>
+            //   </Popconfirm>
+            // );
+            return <Text type="secondary">—</Text>;
           }
           return (
             <Space>

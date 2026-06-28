@@ -829,17 +829,27 @@ export default function Transfers() {
                     <>
                       {fields.map(field => {
                         const cohort = lineCohorts[field.key];
-                        // One source cohort per allocation per transfer — mirrors
-                        // the old one-line-per-allocation rule and keeps the
-                        // backend's allocation-level availability accounting valid.
-                        const usedAllocIds = new Set(
-                          Object.entries(lineCohorts)
-                            .filter(([k]) => k !== String(field.key))
-                            .map(([, c]) => c?.allocationId)
-                            .filter(Boolean)
-                        );
+                        // Multiple cohorts of the SAME allocation may be combined
+                        // in one transfer (e.g. two different payments). We only
+                        // prevent picking the exact same cohort twice, and mixing
+                        // an allocation's "All paid" pool with one of its
+                        // individual payments (that would double-count). The
+                        // backend aggregates per allocation as the hard guard.
+                        const otherCohorts = Object.entries(lineCohorts)
+                          .filter(([k]) => k !== String(field.key))
+                          .map(([, c]) => c)
+                          .filter(Boolean);
+                        const usedKeys = new Set(otherCohorts.map(c => c.key));
+                        const allpaidUsedAllocs = new Set(otherCohorts.filter(c => c.kind === 'allpaid').map(c => c.allocationId));
+                        const paidUsedAllocs = new Set(otherCohorts.filter(c => c.kind === 'paid').map(c => c.allocationId));
                         const cohortOptions = allCohorts
-                          .filter(c => c.allocationId === cohort?.allocationId || !usedAllocIds.has(c.allocationId))
+                          .filter(c => {
+                            if (c.key === cohort?.key) return true; // keep current selection visible
+                            if (usedKeys.has(c.key)) return false;  // no exact duplicate
+                            if (c.kind === 'allpaid' && paidUsedAllocs.has(c.allocationId)) return false;
+                            if (c.kind === 'paid' && allpaidUsedAllocs.has(c.allocationId)) return false;
+                            return true;
+                          })
                           .map(c => ({ value: c.key, label: c.label }));
 
                         return (
@@ -922,7 +932,7 @@ export default function Transfers() {
                       <Row justify="space-between" align="middle" style={{ marginBottom: 16 }}>
                         <Col>
                           <Button type="dashed"
-                            disabled={fields.length >= (transferorSummary?.allocations?.length || 0)}
+                            disabled={fields.length >= allCohorts.length}
                             onClick={() => add({})}>
                             + Add another source
                           </Button>

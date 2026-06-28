@@ -138,6 +138,14 @@ func CreateTransfer(c *gin.Context) {
 	// === MULTI-LINE PATH ===
 	if len(input.Lines) > 0 {
 		totalPaid, totalUnpaid := int64(0), int64(0)
+		// Multiple lines may draw from the SAME allocation (different payment
+		// cohorts). Aggregate the demand per allocation (and per source payment)
+		// so the availability checks see the COMBINED request, not each line in
+		// isolation — otherwise two lines on one allocation could each pass
+		// against the full pool and double-spend on approval.
+		consumedPaid := map[uint]int64{}
+		consumedUnpaid := map[uint]int64{}
+		consumedByInv := map[uint]int64{}
 		for _, line := range input.Lines {
 			var alloc models.Allocation
 			if err := database.DB.First(&alloc, line.FromAllocationID).Error; err != nil {
@@ -170,10 +178,13 @@ func CreateTransfer(c *gin.Context) {
 					c.JSON(http.StatusBadRequest, gin.H{"error": "Source payment is not an active, approved share purchase"})
 					return
 				}
-				if line.PaidSharesToTransfer > srcInv.NumberOfShares {
+				// Aggregate across lines so two lines naming the same payment
+				// can't together exceed it.
+				consumedByInv[*line.FromInvestmentID] += line.PaidSharesToTransfer
+				if consumedByInv[*line.FromInvestmentID] > srcInv.NumberOfShares {
 					c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf(
-						"Paid shares to transfer (%d) exceeds the selected payment's shares (%d)",
-						line.PaidSharesToTransfer, srcInv.NumberOfShares)})
+						"Paid shares to transfer from the selected payment (%d total) exceed the payment's %d shares",
+						consumedByInv[*line.FromInvestmentID], srcInv.NumberOfShares)})
 					return
 				}
 			}
@@ -228,23 +239,28 @@ func CreateTransfer(c *gin.Context) {
 				availUnpaid = totalFree
 			}
 
-			if line.PaidSharesToTransfer > availPaid {
+			// Aggregate per allocation across all lines in THIS transfer (a
+			// shareholder may transfer several payment cohorts of one allocation
+			// at once). The checks compare the running per-allocation total.
+			consumedPaid[line.FromAllocationID] += line.PaidSharesToTransfer
+			consumedUnpaid[line.FromAllocationID] += line.UnpaidSharesToTransfer
+			if consumedPaid[line.FromAllocationID] > availPaid {
 				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf(
-					"Allocation %d: paid shares to transfer (%d) exceeds available paid (%d — %d paid − %d blocked − %d already pending in other transfers)",
-					line.FromAllocationID, line.PaidSharesToTransfer, availPaid, srcPaidShares, effPaidBlocked, pendingPaidOut)})
+					"Allocation %d: paid shares to transfer (%d total across lines) exceeds available paid (%d — %d paid − %d blocked − %d already pending in other transfers)",
+					line.FromAllocationID, consumedPaid[line.FromAllocationID], availPaid, srcPaidShares, effPaidBlocked, pendingPaidOut)})
 				return
 			}
-			if line.UnpaidSharesToTransfer > availUnpaid {
+			if consumedUnpaid[line.FromAllocationID] > availUnpaid {
 				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf(
-					"Allocation %d: unpaid shares to transfer (%d) exceeds available unpaid (%d — %d unpaid − %d blocked − %d already pending in other transfers)",
-					line.FromAllocationID, line.UnpaidSharesToTransfer, availUnpaid, srcUnpaidShares, effUnpaidBlocked, pendingUnpaidOut)})
+					"Allocation %d: unpaid shares to transfer (%d total across lines) exceeds available unpaid (%d — %d unpaid − %d blocked − %d already pending in other transfers)",
+					line.FromAllocationID, consumedUnpaid[line.FromAllocationID], availUnpaid, srcUnpaidShares, effUnpaidBlocked, pendingUnpaidOut)})
 				return
 			}
-			totalLineRequested := line.PaidSharesToTransfer + line.UnpaidSharesToTransfer
-			if totalLineRequested > totalFree {
+			totalAllocRequested := consumedPaid[line.FromAllocationID] + consumedUnpaid[line.FromAllocationID]
+			if totalAllocRequested > totalFree {
 				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf(
 					"Allocation %d: total shares to transfer (%d) exceeds total free (%d — %d allocated − %d blocked − %d already pending)",
-					line.FromAllocationID, totalLineRequested, totalFree, alloc.AllocatedShares, totalBlocked, pendingPaidOut+pendingUnpaidOut)})
+					line.FromAllocationID, totalAllocRequested, totalFree, alloc.AllocatedShares, totalBlocked, pendingPaidOut+pendingUnpaidOut)})
 				return
 			}
 			totalPaid += line.PaidSharesToTransfer

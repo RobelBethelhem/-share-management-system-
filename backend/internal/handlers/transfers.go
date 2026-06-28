@@ -104,6 +104,11 @@ func CreateTransfer(c *gin.Context) {
 		FromAllocationID       uint  `json:"from_allocation_id" binding:"required"`
 		PaidSharesToTransfer   int64 `json:"paid_shares_to_transfer"`
 		UnpaidSharesToTransfer int64 `json:"unpaid_shares_to_transfer"`
+		// FromInvestmentID identifies the specific paid payment (cohort) the
+		// shares are sold from. Optional (legacy / whole-allocation transfers
+		// omit it). When set, the dividend-from floor is that payment's date —
+		// not the allocation's earliest — and the paid shares can't exceed it.
+		FromInvestmentID *uint `json:"from_investment_id"`
 	}
 	type TransferInput struct {
 		TransferorID       uint        `json:"transferor_id" binding:"required"`
@@ -142,6 +147,35 @@ func CreateTransfer(c *gin.Context) {
 			if alloc.ShareholderID != input.TransferorID {
 				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Allocation %d does not belong to the transferor", line.FromAllocationID)})
 				return
+			}
+			// When a specific source payment (cohort) is named, validate it and
+			// cap the paid shares to that payment — you can't sell more of a
+			// cohort than it holds, and it must be an approved positive share
+			// purchase belonging to the transferor and this allocation.
+			if line.FromInvestmentID != nil {
+				var srcInv models.Investment
+				if err := database.DB.First(&srcInv, *line.FromInvestmentID).Error; err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Source payment %d not found", *line.FromInvestmentID)})
+					return
+				}
+				if srcInv.ShareholderID != input.TransferorID {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "Source payment does not belong to the transferor"})
+					return
+				}
+				if srcInv.AllocationID == nil || *srcInv.AllocationID != line.FromAllocationID {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "Source payment is not part of the selected allocation"})
+					return
+				}
+				if srcInv.NumberOfShares <= 0 || srcInv.ApprovalStatus != "approved" || srcInv.Status != "active" {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "Source payment is not an active, approved share purchase"})
+					return
+				}
+				if line.PaidSharesToTransfer > srcInv.NumberOfShares {
+					c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf(
+						"Paid shares to transfer (%d) exceeds the selected payment's shares (%d)",
+						line.PaidSharesToTransfer, srcInv.NumberOfShares)})
+					return
+				}
 			}
 			// Compute effective paid shares using FIFO unlinked-pool — must match
 			// GetShareholderInvestmentSummary (i.e., what the UI displays) exactly.
@@ -281,23 +315,37 @@ func CreateTransfer(c *gin.Context) {
 		}
 
 		// Dividend-from-date floor. The AgreedDividendDate cannot be earlier
-		// than the acquisition date of any source allocation — backdating it
-		// would credit the new owner (and debit the old) for days the shares
-		// hadn't yet entered the source allocation, producing negative cohort
-		// rows in the dividend breakdown. Floor = the LATEST acquisition date
-		// across all source allocations.
+		// than when the source shares were acquired — backdating it would credit
+		// the new owner (and debit the old) for days the shares didn't yet
+		// exist, producing negative cohort rows in the dividend breakdown.
+		// When a specific source payment is named, the floor is THAT payment's
+		// date (e.g. an Oct 21 payment can't be transferred effective Sep 1);
+		// otherwise it falls back to the source allocation's earliest
+		// acquisition. Floor = the LATEST such date across all source lines.
 		if input.AgreedDividendDate != nil {
 			var floor *time.Time
-			var floorAllocNo string
+			var floorLabel string
 			for _, line := range input.Lines {
-				var alloc models.Allocation
-				if err := database.DB.First(&alloc, line.FromAllocationID).Error; err != nil {
-					continue
+				var cand *time.Time
+				var label string
+				if line.FromInvestmentID != nil {
+					var srcInv models.Investment
+					if err := database.DB.First(&srcInv, *line.FromInvestmentID).Error; err == nil && srcInv.PaymentDate != nil {
+						cand = srcInv.PaymentDate
+						label = fmt.Sprintf("the selected payment (%s)", srcInv.PaymentDate.Format("2006-01-02"))
+					}
 				}
-				acq := allocationAcquisitionDate(alloc)
-				if acq != nil && (floor == nil || acq.After(*floor)) {
-					floor = acq
-					floorAllocNo = alloc.AllocationNo
+				if cand == nil {
+					var alloc models.Allocation
+					if err := database.DB.First(&alloc, line.FromAllocationID).Error; err != nil {
+						continue
+					}
+					cand = allocationAcquisitionDate(alloc)
+					label = fmt.Sprintf("source allocation %s acquired its shares", alloc.AllocationNo)
+				}
+				if cand != nil && (floor == nil || cand.After(*floor)) {
+					floor = cand
+					floorLabel = label
 				}
 			}
 			if floor != nil {
@@ -309,12 +357,11 @@ func CreateTransfer(c *gin.Context) {
 				if agreedDay.Before(floorDay) {
 					c.JSON(http.StatusBadRequest, gin.H{
 						"error": fmt.Sprintf(
-							"Dividend From Share Transfer Date (%s) cannot be earlier than when the source allocation %s acquired its shares (%s). Pick a date on or after %s.",
-							agreedDay.Format("2006-01-02"), floorAllocNo,
+							"Dividend From Share Transfer Date (%s) cannot be earlier than when %s (%s). Pick a date on or after %s.",
+							agreedDay.Format("2006-01-02"), floorLabel,
 							floorDay.Format("2006-01-02"), floorDay.Format("2006-01-02"),
 						),
 						"min_dividend_date": floorDay.Format("2006-01-02"),
-						"allocation_no":     floorAllocNo,
 					})
 					return
 				}
@@ -334,6 +381,13 @@ func CreateTransfer(c *gin.Context) {
 			}
 		}
 		input.NumberOfShares = totalPaid + totalUnpaid
+		// Whole-share floor: a transfer must move at least one whole share
+		// (shares are integers, so this is the "amount >= one par value"
+		// equivalent for transfers).
+		if input.NumberOfShares < 1 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Transfer must move at least one whole share."})
+			return
+		}
 	} else {
 		// === LEGACY SINGLE-ALLOCATION PATH ===
 		if input.FromAllocationID != nil {

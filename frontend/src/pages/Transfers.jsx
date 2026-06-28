@@ -11,7 +11,7 @@ import dayjs from 'dayjs';
 import {
   getTransfers, createTransfer, calculateTransferFees, searchShareholders,
   getShareholders, getShareholderInvestmentSummary, getShareBlocks, getBankCapital,
-  searchTransfersAdvanced,
+  searchTransfersAdvanced, getInvestments,
 } from '../services/api';
 import { formatCurrency, formatNumber, transferTypes } from '../utils/format';
 import AdvancedSearchPanel from '../components/AdvancedSearchPanel';
@@ -73,6 +73,11 @@ export default function Transfers() {
   // Per-line state (keyed by field.key)
   const [lineAllocs, setLineAllocs] = useState({});
   const [lineModes, setLineModes] = useState({});
+  // Selected source cohort per line (a specific payment, the whole paid pool,
+  // or the unpaid pool of an allocation). Drives the dividend-from floor.
+  const [lineCohorts, setLineCohorts] = useState({});
+  // The transferor's positive paid investments (payments), for cohort listing.
+  const [transferorPayments, setTransferorPayments] = useState([]);
 
   // Transferee summary for destination matching
   const [transfereeSummary, setTransfereeSummary] = useState(null);
@@ -180,6 +185,69 @@ export default function Transfers() {
   const resetLineState = () => {
     setLineAllocs({});
     setLineModes({});
+    setLineCohorts({});
+  };
+
+  // Build the selectable source cohorts for the transferor: each individual
+  // paid payment (with its own date → its own dividend-from floor), a
+  // whole-allocation "All paid" pool (covers the unlinked pool / legacy), and
+  // the unpaid (subscribed) pool. Caps respect blocks via the allocation's
+  // available paid/unpaid (same math the per-line card used before).
+  const cohortsForTransferor = () => {
+    const allocs = transferorSummary?.allocations || [];
+    const out = [];
+    for (const a of allocs) {
+      const paid = a.paid_shares || 0;
+      const unpaid = Math.max(0, (a.allocated_shares || 0) - paid);
+      const totalBlocked = a.blocked_shares || 0;
+      const totalFree = Math.max(0, (a.allocated_shares || 0) - totalBlocked);
+      const availPaid = Math.max(0, Math.min(paid - (a.paid_blocked_shares || 0), totalFree));
+      const availUnpaid = Math.max(0, Math.min(unpaid - (a.unpaid_blocked_shares || 0), totalFree));
+      const acq = a.acquisition_date || a.allocation_date;
+      const pays = (transferorPayments || [])
+        .filter(p => p.allocation_id === a.id && (p.number_of_shares || 0) > 0)
+        .sort((x, y) => dayjs(x.payment_date).valueOf() - dayjs(y.payment_date).valueOf());
+      for (const p of pays) {
+        const cap = Math.min(p.number_of_shares, availPaid);
+        if (cap <= 0) continue;
+        out.push({
+          key: `paid-${p.id}`, kind: 'paid', allocationId: a.id, allocationNo: a.allocation_no,
+          round: a.round, investmentId: p.id, date: p.payment_date, shares: cap,
+          label: `${a.allocation_no} · Payment ${dayjs(p.payment_date).format('YYYY-MM-DD')} · ${(p.number_of_shares).toLocaleString()} sh${p.payment_method ? ` (${p.payment_method})` : ''}${cap < p.number_of_shares ? ` — ${cap.toLocaleString()} avail` : ''}`,
+        });
+      }
+      if (availPaid > 0) {
+        out.push({
+          key: `allpaid-${a.id}`, kind: 'allpaid', allocationId: a.id, allocationNo: a.allocation_no,
+          round: a.round, investmentId: null, date: acq, shares: availPaid,
+          label: `${a.allocation_no} · All paid · ${availPaid.toLocaleString()} sh${acq ? ` · since ${dayjs(acq).format('YYYY-MM-DD')}` : ''}`,
+        });
+      }
+      if (availUnpaid > 0) {
+        out.push({
+          key: `unpaid-${a.id}`, kind: 'unpaid', allocationId: a.id, allocationNo: a.allocation_no,
+          round: a.round, investmentId: null, date: acq, shares: availUnpaid,
+          label: `${a.allocation_no} · Unpaid (subscribed) · ${availUnpaid.toLocaleString()} sh`,
+        });
+      }
+    }
+    return out;
+  };
+
+  const onCohortChange = (field, cohortKey, cohorts) => {
+    const cohort = cohorts.find(c => c.key === cohortKey) || null;
+    if (!cohort) return;
+    const a = (transferorSummary?.allocations || []).find(x => x.id === cohort.allocationId) || null;
+    const newLineAllocs = { ...lineAllocs, [field.key]: a };
+    setLineAllocs(newLineAllocs);
+    setLineCohorts(prev => ({ ...prev, [field.key]: cohort }));
+    setLineModes(prev => ({ ...prev, [field.key]: cohort.kind === 'unpaid' ? 'unpaid_only' : 'paid_only' }));
+    form.setFieldValue(['lines', field.name, 'from_allocation_id'], cohort.allocationId);
+    // Reset both share fields; the user fills only the active one.
+    form.setFieldValue(['lines', field.name, 'paid_shares_to_transfer'], cohort.kind === 'unpaid' ? 0 : undefined);
+    form.setFieldValue(['lines', field.name, 'unpaid_shares_to_transfer'], cohort.kind === 'unpaid' ? undefined : 0);
+    updateDestSuggestion(newLineAllocs, undefined);
+    setTimeout(syncTotal, 0);
   };
 
   const resetDestState = () => {
@@ -217,12 +285,13 @@ export default function Transfers() {
   // allocation (else the dividend breakdown goes negative). Returns a dayjs
   // or null when no allocation with an acquisition date is selected.
   const dividendFromFloor = () => {
-    const selected = Object.values(lineAllocs).filter(Boolean);
+    // Floor = latest source date across selected cohorts. For a specific
+    // payment that's the payment date; for the all-paid/unpaid pools it's the
+    // allocation's acquisition date.
     let floor = null;
-    for (const a of selected) {
-      const acq = a.acquisition_date || a.allocation_date;
-      if (!acq) continue;
-      const d = dayjs(acq).startOf('day');
+    for (const c of Object.values(lineCohorts)) {
+      if (!c?.date) continue;
+      const d = dayjs(c.date).startOf('day');
       if (!floor || d.isAfter(floor)) floor = d;
     }
     return floor;
@@ -231,6 +300,7 @@ export default function Transfers() {
   const handleTransferorChange = async (shareholderId) => {
     setTransferorSummary(null);
     setTransferorBlocks([]);
+    setTransferorPayments([]);
     setTransferorDetailOpen(false);
     resetLineState();
     setAllocTransfers({});
@@ -238,12 +308,17 @@ export default function Transfers() {
     if (!shareholderId) return;
     setSummaryLoading(true);
     try {
-      const [summaryRes, blockRes] = await Promise.all([
+      const [summaryRes, blockRes, invRes] = await Promise.all([
         getShareholderInvestmentSummary(shareholderId),
         getShareBlocks({ shareholder_id: shareholderId, page_size: 50 }),
+        getInvestments({ shareholder_id: shareholderId, approval_status: 'approved', page_size: 500 }),
       ]);
       setTransferorSummary(summaryRes.data);
       setTransferorBlocks((blockRes.data.data || []).filter(b => !b.is_released));
+      // Positive, active, allocation-linked payments become per-cohort sources.
+      setTransferorPayments((invRes.data.data || []).filter(
+        i => (i.number_of_shares || 0) > 0 && i.status === 'active' && i.allocation_id
+      ));
     } catch { /* ignore */ }
     setSummaryLoading(false);
   };
@@ -330,8 +405,12 @@ export default function Transfers() {
         // find the field key for this index
         const fkey = fieldKeysRef.current[idx];
         const mode = (fkey != null ? lineModes[fkey] : null) || 'paid_only';
+        const cohort = fkey != null ? lineCohorts[fkey] : null;
         return {
           from_allocation_id:        line.from_allocation_id,
+          // Specific source payment (for the dividend-from floor + cap); only
+          // meaningful for a paid payment cohort.
+          from_investment_id:        cohort?.kind === 'paid' ? cohort.investmentId : undefined,
           paid_shares_to_transfer:   mode !== 'unpaid_only' ? (line.paid_shares_to_transfer  || 0) : 0,
           unpaid_shares_to_transfer: mode !== 'paid_only'   ? (line.unpaid_shares_to_transfer || 0) : 0,
         };
@@ -740,34 +819,28 @@ export default function Transfers() {
           {transferorSummary && (
             <>
               <Divider style={{ margin: '8px 0' }} />
-              <Text strong style={{ display: 'block', marginBottom: 8 }}>Source Allocations</Text>
+              <Text strong style={{ display: 'block', marginBottom: 8 }}>Source Payments</Text>
               <Form.List name="lines" initialValue={[{}]}>
                 {(fields, { add, remove }) => {
                   // Keep ref in sync with current field keys for submit mapping
                   fieldKeysRef.current = fields.map(f => f.key);
+                  const allCohorts = cohortsForTransferor();
                   return (
                     <>
                       {fields.map(field => {
-                        const alloc = lineAllocs[field.key];
-                        const mode = lineModes[field.key] || 'paid_only';
-                        const paid = alloc?.paid_shares || 0;
-                        const unpaid = Math.max(0, (alloc?.allocated_shares || 0) - paid);
-                        const paidBlocked = alloc?.paid_blocked_shares || 0;
-                        const unpaidBlocked = alloc?.unpaid_blocked_shares || 0;
-                        // Use direct blocked_shares for totalFree — catches legacy blocks with no split.
-                        const totalBlockedOnAlloc = alloc?.blocked_shares || 0;
-                        const totalFreeOnAlloc = Math.max(0, (alloc?.allocated_shares || 0) - totalBlockedOnAlloc);
-                        const availPaid = Math.max(0, Math.min(paid - paidBlocked, totalFreeOnAlloc));
-                        const availUnpaid = Math.max(0, Math.min(unpaid - unpaidBlocked, totalFreeOnAlloc));
-
-                        const usedIds = new Set(
-                          Object.entries(lineAllocs)
+                        const cohort = lineCohorts[field.key];
+                        // One source cohort per allocation per transfer — mirrors
+                        // the old one-line-per-allocation rule and keeps the
+                        // backend's allocation-level availability accounting valid.
+                        const usedAllocIds = new Set(
+                          Object.entries(lineCohorts)
                             .filter(([k]) => k !== String(field.key))
-                            .map(([, a]) => a?.id)
+                            .map(([, c]) => c?.allocationId)
                             .filter(Boolean)
                         );
-                        const availableAllocs = (transferorSummary.allocations || [])
-                          .filter(a => !usedIds.has(a.id));
+                        const cohortOptions = allCohorts
+                          .filter(c => c.allocationId === cohort?.allocationId || !usedAllocIds.has(c.allocationId))
+                          .map(c => ({ value: c.key, label: c.label }));
 
                         return (
                           <Card key={field.key} size="small"
@@ -778,142 +851,68 @@ export default function Transfers() {
                                   remove(field.name);
                                   setLineAllocs(prev => { const n = { ...prev }; delete n[field.key]; return n; });
                                   setLineModes(prev => { const n = { ...prev }; delete n[field.key]; return n; });
+                                  setLineCohorts(prev => { const n = { ...prev }; delete n[field.key]; return n; });
                                   setTimeout(syncTotal, 0);
                                 }}>
                                 Remove
                               </Button>
                             )}>
 
-                            {/* Allocation selector */}
-                            <Form.Item name={[field.name, 'from_allocation_id']}
-                              label="Source Allocation"
-                              rules={[{ required: true, message: 'Select an allocation' }]}
+                            {/* Source payment / cohort selector — the allocation
+                                is derived from the chosen payment. */}
+                            <Form.Item name={[field.name, 'cohort_key']}
+                              label="Source payment"
+                              tooltip="Pick the exact payment to sell from. Each payment has its own date, and the Dividend-From date can't be earlier than it. The allocation is derived from the payment."
+                              rules={[{ required: true, message: 'Select a source payment' }]}
                               style={{ marginBottom: 8 }}>
                               <Select
-                                placeholder="Select allocation..."
-                                onChange={(allocId) => {
-                                  const a = transferorSummary.allocations.find(x => x.id === allocId);
-                                  const newLineAllocs = { ...lineAllocs, [field.key]: a || null };
-                                  setLineAllocs(newLineAllocs);
-                                  setLineModes(prev => ({ ...prev, [field.key]: 'paid_only' }));
-                                  form.setFieldValue(['lines', field.name, 'paid_shares_to_transfer'], undefined);
-                                  form.setFieldValue(['lines', field.name, 'unpaid_shares_to_transfer'], 0);
-                                  updateDestSuggestion(newLineAllocs, undefined);
-                                  setTimeout(syncTotal, 0);
-                                }}
-                                options={availableAllocs.map(a => {
-                                  const aPaid = a.paid_shares || 0;
-                                  const aUnpaid = Math.max(0, (a.allocated_shares || 0) - aPaid);
-                                  const aPaidBlocked = a.paid_blocked_shares || 0;
-                                  const aUnpaidBlocked = a.unpaid_blocked_shares || 0;
-                                  const aTotalBlocked = a.blocked_shares || 0;
-                                  const aTotalFree = Math.max(0, (a.allocated_shares || 0) - aTotalBlocked);
-                                  const aAvailPaid = Math.max(0, Math.min(aPaid - aPaidBlocked, aTotalFree));
-                                  const aAvailUnpaid = Math.max(0, Math.min(aUnpaid - aUnpaidBlocked, aTotalFree));
-                                  // Legacy blocks: no split info, show total
-                                  const blockNote = aTotalBlocked > 0
-                                    ? (aPaidBlocked === 0 && aUnpaidBlocked === 0)
-                                      ? ` [${aTotalBlocked} blocked → ${aTotalFree} avail]`
-                                      : ` [${aPaidBlocked > 0 ? `${aPaidBlocked}p` : ''}${aPaidBlocked > 0 && aUnpaidBlocked > 0 ? '+' : ''}${aUnpaidBlocked > 0 ? `${aUnpaidBlocked}u` : ''} blocked → ${aAvailPaid}p·${aAvailUnpaid}u avail]`
-                                    : '';
-                                  return {
-                                    value: a.id,
-                                    label: `${a.allocation_no} | Rnd ${a.round} | ${aPaid} paid · ${aUnpaid} unpaid${blockNote}`,
-                                  };
-                                })}
+                                placeholder="Select a payment / cohort to transfer from…"
+                                onChange={(ck) => onCohortChange(field, ck, allCohorts)}
+                                options={cohortOptions}
+                                notFoundContent="No transferable shares for this shareholder"
                               />
                             </Form.Item>
 
-                            {/* Breakdown section */}
-                            {alloc && (
+                            {/* Selected cohort detail + single shares input */}
+                            {cohort && (
                               <>
                                 <Row gutter={12} style={{ marginBottom: 8 }}>
                                   <Col span={8}>
-                                    <Text type="secondary" style={{ fontSize: 11 }}>PAID/OWNED</Text>
-                                    <div><Text strong style={{ color: '#52c41a' }}>{paid.toLocaleString()} shares</Text></div>
-                                    {(paidBlocked > 0 || (totalBlockedOnAlloc > 0 && paidBlocked === 0 && unpaidBlocked === 0)) && (
-                                      <div style={{ fontSize: 11 }}>
-                                        <Text style={{ color: '#ff4d4f' }}>−{paidBlocked > 0 ? paidBlocked : totalBlockedOnAlloc} blocked</Text>
-                                        <Text style={{ color: '#52c41a', marginLeft: 4 }}>= {availPaid} avail</Text>
-                                      </div>
-                                    )}
+                                    <Text type="secondary" style={{ fontSize: 11 }}>ALLOCATION</Text>
+                                    <div><Tag color="purple">{cohort.allocationNo} · Rnd {cohort.round}</Tag></div>
                                   </Col>
                                   <Col span={8}>
-                                    <Text type="secondary" style={{ fontSize: 11 }}>UNPAID/SUBSCRIBED</Text>
-                                    <div><Text strong style={{ color: '#faad14' }}>{unpaid.toLocaleString()} shares</Text></div>
-                                    {unpaidBlocked > 0 && (
-                                      <div style={{ fontSize: 11 }}>
-                                        <Text style={{ color: '#ff4d4f' }}>−{unpaidBlocked} blocked</Text>
-                                        <Text style={{ color: '#faad14', marginLeft: 4 }}>= {availUnpaid} avail</Text>
-                                      </div>
-                                    )}
+                                    <Text type="secondary" style={{ fontSize: 11 }}>
+                                      {cohort.kind === 'unpaid' ? 'UNPAID (SUBSCRIBED)' : 'PAID'} AVAILABLE
+                                    </Text>
+                                    <div><Text strong style={{ color: cohort.kind === 'unpaid' ? '#faad14' : '#52c41a' }}>{cohort.shares.toLocaleString()} shares</Text></div>
                                   </Col>
                                   <Col span={8}>
-                                    <Text type="secondary" style={{ fontSize: 11 }}>LINE SUBTOTAL</Text>
-                                    <div>
-                                      <Text strong style={{ color: '#d32f2f' }}>
-                                        {((form.getFieldValue(['lines', field.name, 'paid_shares_to_transfer']) || 0) +
-                                          (form.getFieldValue(['lines', field.name, 'unpaid_shares_to_transfer']) || 0)).toLocaleString()} shares
-                                      </Text>
-                                    </div>
+                                    <Text type="secondary" style={{ fontSize: 11 }}>DIVIDEND-FROM FLOOR</Text>
+                                    <div><Text strong>{cohort.date ? dayjs(cohort.date).format('YYYY-MM-DD') : '—'}</Text></div>
                                   </Col>
                                 </Row>
 
-                                <Form.Item label="Transfer From" style={{ marginBottom: 8 }}>
-                                  <Radio.Group value={mode}
-                                    onChange={e => handleLineModeChange(field.key, e.target.value, alloc, field.name)}
-                                    optionType="button" buttonStyle="solid" size="small">
-                                    <Radio.Button value="paid_only" disabled={availPaid === 0}>Paid Only</Radio.Button>
-                                    <Radio.Button value="unpaid_only" disabled={availUnpaid === 0}>Unpaid Only</Radio.Button>
-                                    <Radio.Button value="both" disabled={availPaid === 0 || availUnpaid === 0}>Both</Radio.Button>
-                                    <Radio.Button value="full" disabled={availPaid + availUnpaid === 0}>Full</Radio.Button>
-                                  </Radio.Group>
+                                <Form.Item
+                                  name={[field.name, cohort.kind === 'unpaid' ? 'unpaid_shares_to_transfer' : 'paid_shares_to_transfer']}
+                                  label={`Shares to transfer (max ${cohort.shares.toLocaleString()})`}
+                                  validateFirst
+                                  rules={[
+                                    { required: true, message: 'Required' },
+                                    {
+                                      validator: (_, v) => {
+                                        if (v == null || v === '') return Promise.resolve();
+                                        if (v < 1) return Promise.reject(new Error('Must be at least 1'));
+                                        if (v > cohort.shares) return Promise.reject(new Error(`Cannot exceed available ${cohort.shares.toLocaleString()} shares. Reduce the amount.`));
+                                        return Promise.resolve();
+                                      },
+                                    },
+                                  ]}
+                                  style={{ marginBottom: 8 }}>
+                                  {/* No max prop: keep an over-limit value so the validator shows a
+                                      hard error rather than AntD silently clamping it on blur. */}
+                                  <InputNumber style={{ width: '100%' }} min={1} precision={0} onChange={syncTotal} />
                                 </Form.Item>
-
-                                {(mode === 'paid_only' || mode === 'both') && (
-                                  <Form.Item name={[field.name, 'paid_shares_to_transfer']}
-                                    label={`Paid shares (max ${availPaid.toLocaleString()}${paidBlocked > 0 ? ` = ${paid} − ${paidBlocked} blocked` : totalBlockedOnAlloc > 0 ? ` = capped by ${totalBlockedOnAlloc} blocked` : ''})`}
-                                    validateFirst
-                                    rules={[
-                                      { required: true, message: 'Required' },
-                                      {
-                                        validator: (_, v) => {
-                                          if (v == null || v === '') return Promise.resolve();
-                                          if (v < 1) return Promise.reject(new Error('Must be at least 1'));
-                                          if (v > availPaid) return Promise.reject(new Error(`Cannot exceed available paid shares (${availPaid.toLocaleString()}). Reduce the amount.`));
-                                          return Promise.resolve();
-                                        },
-                                      },
-                                    ]}
-                                    style={{ marginBottom: 8 }}>
-                                    {/* No max prop: we want the over-limit value to PERSIST so the
-                                        validator shows a hard error and blocks submit, rather than
-                                        AntD silently clamping it to the max on blur. */}
-                                    <InputNumber style={{ width: '100%' }} min={1} precision={0}
-                                      disabled={mode === 'full'} onChange={syncTotal} />
-                                  </Form.Item>
-                                )}
-
-                                {(mode === 'unpaid_only' || mode === 'both') && (
-                                  <Form.Item name={[field.name, 'unpaid_shares_to_transfer']}
-                                    label={`Unpaid shares (max ${availUnpaid.toLocaleString()}${unpaidBlocked > 0 ? ` = ${unpaid} − ${unpaidBlocked} blocked` : ''})`}
-                                    validateFirst
-                                    rules={[
-                                      { required: true, message: 'Required' },
-                                      {
-                                        validator: (_, v) => {
-                                          if (v == null || v === '') return Promise.resolve();
-                                          if (v < 1) return Promise.reject(new Error('Must be at least 1'));
-                                          if (v > availUnpaid) return Promise.reject(new Error(`Cannot exceed available unpaid shares (${availUnpaid.toLocaleString()}). Reduce the amount.`));
-                                          return Promise.resolve();
-                                        },
-                                      },
-                                    ]}
-                                    style={{ marginBottom: 8 }}>
-                                    <InputNumber style={{ width: '100%' }} min={1} precision={0}
-                                      disabled={mode === 'full'} onChange={syncTotal} />
-                                  </Form.Item>
-                                )}
                               </>
                             )}
                           </Card>
@@ -925,11 +924,11 @@ export default function Transfers() {
                           <Button type="dashed"
                             disabled={fields.length >= (transferorSummary?.allocations?.length || 0)}
                             onClick={() => add({})}>
-                            + Add Allocation
+                            + Add another source
                           </Button>
                         </Col>
                         <Col>
-                          <Text type="secondary">Total across all allocations: </Text>
+                          <Text type="secondary">Total across all sources: </Text>
                           <Text strong style={{ color: '#d32f2f', fontSize: 14 }}>
                             {(form.getFieldValue('number_of_shares') || 0).toLocaleString()} shares
                           </Text>

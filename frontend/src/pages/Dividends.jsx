@@ -134,7 +134,7 @@ export default function Dividends() {
   // 400 on Mar 15, ref June 30 →
   //   500 shares  Sep 10 → Jan 4  (117 days, left in T1)
   //   400 shares  Sep 10 → Mar 14 (186 days, left in T2)
-  //   100 shares  Sep 10 → Jun 30 (293 days, stayed)
+  //   100 shares  Sep 10 → Jun 30 (294 days, stayed — inclusive of both ends)
   const computePhasedRows = (entries, daysInYear, referenceDate) => {
     if (!entries?.length) return [];
     const refDate = referenceDate ? dayjs(referenceDate).startOf('day') : dayjs().startOf('day');
@@ -159,8 +159,11 @@ export default function Dividends() {
 
     const cohorts = [];
     // Audit-equivalent days for a single calendar date relative to the
-    // reference. Matches backend daysHeld semantics: never exceeds dY.
-    const auditDays = (d) => Math.min(dY, Math.max(0, refDate.diff(d, 'day')));
+    // reference. Matches backend daysHeld semantics: acquisition day AND
+    // reference day are BOTH counted (inclusive, hence + 1); never exceeds dY.
+    // In consumption cohorts the + 1 cancels in auditDays(add) − auditDays(sub),
+    // so only "stayed" cohorts and same-date edges shift by a day.
+    const auditDays = (d) => Math.min(dY, Math.max(0, refDate.diff(d, 'day') + 1));
 
     const pushConsumption = (p, sub, take) => {
       const addDate = dayjs(p.payment_date).startOf('day');
@@ -255,7 +258,9 @@ export default function Dividends() {
         if (p._remaining > 0) {
           const addDate = dayjs(p.payment_date).startOf('day');
           const fyDays = auditDays(addDate);
-          const rawDays = Math.max(0, refDate.diff(addDate, 'day'));
+          // Inclusive raw ownership: addDate..refDate counts both ends (+ 1),
+          // consistent with the new acquisition-day-counts rule.
+          const rawDays = Math.max(0, refDate.diff(addDate, 'day') + 1);
           cohorts.push({
             key: `c-${p.investment_id}-stayed`,
             shares: p._remaining,

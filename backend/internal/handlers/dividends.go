@@ -30,15 +30,18 @@ func truncToDay(t time.Time) time.Time {
 }
 
 // wholeDaysHeld returns the whole days a position is held for dividend
-// purposes. The acquisition (payment) day is EXCLUSIVE and the period-end
-// (reference) day is INCLUSIVE: a share acquired today first earns a day
-// tomorrow (today = 0, tomorrow = 1), while the reference date itself still
-// counts. Both inputs are truncated to their calendar date so a time-of-day
-// component never produces a fractional or off-by-one count. The result can
-// be negative when the payment date is after the end date — callers skip
-// those (the share didn't exist yet during the period).
+// purposes. BOTH the acquisition (payment) day and the period-end (reference)
+// day are INCLUSIVE: a share acquired today already earns 1 day today (today =
+// 1, tomorrow = 2), and a share acquired on the reference date counts 1 day.
+// Both inputs are truncated to their calendar date so a time-of-day component
+// never produces a fractional or off-by-one count. The result is <= 0 when the
+// payment date is after the end date — callers skip those (the share didn't
+// exist during the period). For transfers this places the transfer day itself
+// on the transferee: the transfer_in (payment_date = transfer date) earns that
+// day, and the transfer_out's negative share-days cancel the transferor's
+// credit from the transfer day onward, so the transferor stops the day before.
 func wholeDaysHeld(payDate, endDate time.Time) float64 {
-	return truncToDay(endDate).Sub(truncToDay(payDate)).Hours() / 24
+	return truncToDay(endDate).Sub(truncToDay(payDate)).Hours()/24 + 1
 }
 
 // taxIsActive reports whether dividend tax should be applied for a setting as
@@ -431,12 +434,12 @@ func calculateSharesWithFormula(shareholderID uint, setting models.DividendSetti
 
 	total := float64(0)
 	for _, inv := range investments {
-		// Calculate days_held — acquisition day excluded, reference day
-		// included (date-only). See wholeDaysHeld.
+		// Calculate days_held — acquisition day AND reference day both counted
+		// (date-only, inclusive). See wholeDaysHeld.
 		daysHeld := daysInYear // default: full year if no dates
 		if inv.PaymentDate != nil && setting.ReferenceDate != nil {
 			daysHeld = wholeDaysHeld(*inv.PaymentDate, *setting.ReferenceDate)
-			if daysHeld < 0 {
+			if daysHeld < 1 {
 				continue // investment made after reference date, skip
 			}
 			if daysHeld > daysInYear {

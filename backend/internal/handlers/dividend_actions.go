@@ -71,9 +71,9 @@ func computeLiveDividend(dividend models.Dividend, setting models.DividendSettin
 		if inv.PaymentDate == nil {
 			continue
 		}
-		// Acquisition day excluded, reference day included (date-only).
+		// Acquisition day AND reference day both counted (date-only, inclusive).
 		daysHeld := wholeDaysHeld(*inv.PaymentDate, endDate)
-		if daysHeld < 0 {
+		if daysHeld < 1 {
 			continue
 		}
 		if daysHeld > daysInYear {
@@ -716,13 +716,13 @@ func GetDividendBreakdown(c *gin.Context) {
 		if inv.PaymentDate == nil {
 			continue
 		}
-		// Days held = end_date − payment_date in WHOLE DAYS (acquisition day
-		// excluded, reference day included). Date-only so a transfer recorded
-		// at 14:00 on the same calendar day as the reference date gets
-		// daysHeld = 0 (and stays visible in the audit trail) instead of a
-		// fractional negative that the old comparison silently skipped.
+		// Days held = end_date − payment_date in WHOLE DAYS, with BOTH the
+		// acquisition day and the reference day counted (inclusive). Date-only
+		// so a transfer recorded at 14:00 on the same calendar day as the
+		// reference date counts as daysHeld = 1 (and stays visible in the audit
+		// trail) instead of a fractional value the old comparison mishandled.
 		daysHeld := wholeDaysHeld(*inv.PaymentDate, endDate)
-		if daysHeld < 0 {
+		if daysHeld < 1 {
 			continue // payment AFTER reference date — doesn't contribute
 		}
 		if daysHeld > daysInYear {

@@ -1063,7 +1063,7 @@ export default function Transfers() {
               <Form.Item
                 name="agreed_dividend_date"
                 label="Dividend From Share Transfer Date"
-                tooltip="Dividends up to this date are for the Transferor; from this date onward are for the Transferee. Leave blank to use the transfer approval date. Cannot be earlier than the source allocation's acquisition date."
+                tooltip="This date counts as the Transferee's first dividend day; the Transferor is credited up to the day before. Leave blank to use the transfer approval date. Cannot be earlier than the source allocation's acquisition date."
                 extra={(() => {
                   const floor = dividendFromFloor();
                   return floor

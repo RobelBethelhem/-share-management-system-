@@ -321,6 +321,31 @@ func GetInvestment(c *gin.Context) {
 	c.JSON(http.StatusOK, inv)
 }
 
+// validateMinOneShare enforces that a normal (non-dividend) investment buys at
+// least one whole share: the amount must cover at least one company par value
+// and it must record >= 1 share. Paying less than a single par (e.g. 600 when
+// par is 1,000) buys 0 shares, which is illogical. The dividend-reinvest path
+// snaps to whole shares on its own endpoint, so it is exempt here.
+func validateMinOneShare(inv *models.Investment) error {
+	if inv.PaymentMethod == "dividend" {
+		return nil
+	}
+	// Prefer the authoritative company par from settings; fall back to the
+	// par carried on the investment if settings aren't available.
+	par := inv.ParValue
+	var bc models.BankCapital
+	if err := database.DB.First(&bc).Error; err == nil && bc.ParValuePerShare > 0 {
+		par = bc.ParValuePerShare
+	}
+	if par > 0 && inv.Amount < par {
+		return fmt.Errorf("amount %.2f is below one share's par value (%.2f) — an investment must cover at least one whole share", inv.Amount, par)
+	}
+	if inv.NumberOfShares < 1 {
+		return fmt.Errorf("investment must be for at least one whole share")
+	}
+	return nil
+}
+
 func CreateInvestment(c *gin.Context) {
 	var inv models.Investment
 	if err := c.ShouldBindJSON(&inv); err != nil {
@@ -352,6 +377,12 @@ func CreateInvestment(c *gin.Context) {
 	// Calculate shares from amount if not provided
 	if inv.NumberOfShares == 0 && inv.ParValue > 0 {
 		inv.NumberOfShares = int64(inv.Amount / inv.ParValue)
+	}
+
+	// Must buy at least one whole share (amount >= one par value).
+	if err := validateMinOneShare(&inv); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
 
 	// Allocation cap validation — reject overpayment before creating the row.
@@ -387,6 +418,11 @@ func UpdateInvestment(c *gin.Context) {
 		return
 	}
 	if err := c.ShouldBindJSON(&inv); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	// Must still buy at least one whole share after the edit.
+	if err := validateMinOneShare(&inv); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

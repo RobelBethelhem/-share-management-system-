@@ -861,6 +861,13 @@ export default function Investments() {
                   {
                     validator: (_, v) => {
                       if (v == null) return Promise.resolve();
+                      // Must cover at least one whole share — amount can't be
+                      // below a single par value (e.g. 600 when par is 1,000).
+                      if (parValue > 0 && v < parValue) {
+                        return Promise.reject(new Error(
+                          `Amount must be at least one share — par value ${formatCurrency(parValue)}.`
+                        ));
+                      }
                       if (capAmount !== null && capAmount >= 0 && v > capAmount + 0.01) {
                         return Promise.reject(new Error(
                           selectedAlloc

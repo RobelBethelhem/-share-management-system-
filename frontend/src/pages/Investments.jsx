@@ -861,12 +861,23 @@ export default function Investments() {
                   {
                     validator: (_, v) => {
                       if (v == null) return Promise.resolve();
-                      // Must cover at least one whole share — amount can't be
-                      // below a single par value (e.g. 600 when par is 1,000).
-                      if (parValue > 0 && v < parValue) {
-                        return Promise.reject(new Error(
-                          `Amount must be at least one share — par value ${formatCurrency(parValue)}.`
-                        ));
+                      // Whole shares only: the amount must be an exact multiple
+                      // of the par value — at least one share (>= par), and no
+                      // fraction (e.g. reject 600 and 1,500 when par is 1,000).
+                      if (parValue > 0) {
+                        if (v < parValue) {
+                          return Promise.reject(new Error(
+                            `Amount must be at least one share — par value ${formatCurrency(parValue)}.`
+                          ));
+                        }
+                        const k = v / parValue;
+                        if (Math.abs(k - Math.round(k)) > 1e-6) {
+                          const lo = Math.floor(k) * parValue;
+                          const hi = Math.ceil(k) * parValue;
+                          return Promise.reject(new Error(
+                            `Whole shares only — amount must be an exact multiple of the par value ${formatCurrency(parValue)}. ${formatCurrency(v)} = ${k.toFixed(2)} shares; use ${formatCurrency(lo)} or ${formatCurrency(hi)}.`
+                          ));
+                        }
                       }
                       if (capAmount !== null && capAmount >= 0 && v > capAmount + 0.01) {
                         return Promise.reject(new Error(

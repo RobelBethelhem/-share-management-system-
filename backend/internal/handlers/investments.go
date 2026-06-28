@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"time"
@@ -321,12 +322,13 @@ func GetInvestment(c *gin.Context) {
 	c.JSON(http.StatusOK, inv)
 }
 
-// validateMinOneShare enforces that a normal (non-dividend) investment buys at
-// least one whole share: the amount must cover at least one company par value
-// and it must record >= 1 share. Paying less than a single par (e.g. 600 when
-// par is 1,000) buys 0 shares, which is illogical. The dividend-reinvest path
-// snaps to whole shares on its own endpoint, so it is exempt here.
-func validateMinOneShare(inv *models.Investment) error {
+// validateWholeShareAmount enforces that a normal (non-dividend) investment buys
+// a WHOLE number of shares: the amount must be a positive exact multiple of the
+// company par value — at least one par (no 600 at par 1,000) and evenly
+// divisible (no fraction like 1,500 = 1.5 shares at par 1,000). The
+// dividend-reinvest path snaps to whole shares on its own endpoint, so it is
+// exempt here.
+func validateWholeShareAmount(inv *models.Investment) error {
 	if inv.PaymentMethod == "dividend" {
 		return nil
 	}
@@ -337,8 +339,15 @@ func validateMinOneShare(inv *models.Investment) error {
 	if err := database.DB.First(&bc).Error; err == nil && bc.ParValuePerShare > 0 {
 		par = bc.ParValuePerShare
 	}
-	if par > 0 && inv.Amount < par {
+	if par <= 0 {
+		return nil // can't validate share-evenness without a par value
+	}
+	if inv.Amount < par {
 		return fmt.Errorf("amount %.2f is below one share's par value (%.2f) — an investment must cover at least one whole share", inv.Amount, par)
+	}
+	shares := inv.Amount / par
+	if math.Abs(shares-math.Round(shares)) > 1e-6 {
+		return fmt.Errorf("amount %.2f is not a whole number of shares — it must be an exact multiple of the par value (%.2f); %.2f buys %.2f shares", inv.Amount, par, inv.Amount, shares)
 	}
 	if inv.NumberOfShares < 1 {
 		return fmt.Errorf("investment must be for at least one whole share")
@@ -379,8 +388,8 @@ func CreateInvestment(c *gin.Context) {
 		inv.NumberOfShares = int64(inv.Amount / inv.ParValue)
 	}
 
-	// Must buy at least one whole share (amount >= one par value).
-	if err := validateMinOneShare(&inv); err != nil {
+	// Must buy a whole number of shares (amount = exact multiple of par).
+	if err := validateWholeShareAmount(&inv); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -421,8 +430,8 @@ func UpdateInvestment(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	// Must still buy at least one whole share after the edit.
-	if err := validateMinOneShare(&inv); err != nil {
+	// Must still buy a whole number of shares after the edit.
+	if err := validateWholeShareAmount(&inv); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

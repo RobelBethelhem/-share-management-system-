@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import {
   Table, Button, Modal, Form, Input, Select, Space, Tag,
-  message, Typography, Row, Descriptions, Statistic, Card, Divider, Spin, Col,
+  message, Typography, Row, Descriptions, Statistic, Card, Divider, Spin, Col, Alert,
 } from 'antd';
 import {
   CheckOutlined, CloseOutlined, ShopOutlined, DollarOutlined, TeamOutlined,
@@ -72,8 +72,11 @@ export default function Approvals() {
         return { detail: (await api.get(`/transfers/${id}`)).data };
       case 'subscription':
         return { detail: (await api.get(`/subscriptions/${id}`)).data };
-      case 'block':
-        return { detail: (await api.get(`/share-blocks/${id}`)).data };
+      case 'block': {
+        // GET /share-blocks/:id wraps the row as { block, previous_blocks }.
+        const r = (await api.get(`/share-blocks/${id}`)).data;
+        return { detail: r.block || r };
+      }
       case 'dividend':
         return { detail: (await api.get(`/dividends/${id}`)).data };
       case 'capital_increase': {
@@ -477,6 +480,13 @@ function BlockBody({ detail }) {
   const sh = detail.shareholder;
   return (
     <>
+      {detail.is_release_pending && (
+        <Alert
+          type="warning" showIcon style={{ marginBottom: 12 }}
+          message="Release request"
+          description="Approving will RELEASE this block and free its shares. Rejecting keeps the block active."
+        />
+      )}
       <Descriptions bordered size="small" column={2} style={{ marginBottom: 12 }}>
         <Descriptions.Item label="Shareholder" span={2}>
           <Text strong>{fullName(sh)}</Text> ({sh?.account_no})

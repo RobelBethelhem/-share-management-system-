@@ -155,6 +155,7 @@ export const processShareSplit = (id) => api.post(`/share-splits/${id}/process`)
 export const getShareBlocks = (params) => api.get('/share-blocks', { params });
 export const getShareBlock = (id) => api.get(`/share-blocks/${id}`);
 export const createShareBlock = (data) => api.post('/share-blocks', data);
+export const createShareBlocksBatch = (data) => api.post('/share-blocks/batch', data);
 export const releaseShareBlock = (id) => api.post(`/share-blocks/${id}/release`);
 
 // Certificates

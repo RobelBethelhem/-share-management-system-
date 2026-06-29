@@ -4,10 +4,10 @@ import {
   Space, Tag, message, Typography, Row, Col, Popconfirm, Card, Statistic,
   Divider, Radio, Alert,
 } from 'antd';
-import { PlusOutlined, InfoCircleOutlined, LockOutlined, FilterOutlined } from '@ant-design/icons';
+import { PlusOutlined, InfoCircleOutlined, LockOutlined, FilterOutlined, DeleteOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import {
-  getShareBlocks, createShareBlock, releaseShareBlock, searchShareholders,
+  getShareBlocks, createShareBlocksBatch, releaseShareBlock, searchShareholders,
   getShareholders, getShareholderInvestmentSummary, getBankCapital,
   searchShareBlocksAdvanced,
 } from '../services/api';
@@ -39,6 +39,22 @@ const { Title, Text } = Typography;
 
 const sharesTypeColors = { paid: 'blue', unpaid: 'orange', both: 'red' };
 const sharesTypeLabels = { paid: 'Paid', unpaid: 'Unpaid', both: 'Both' };
+const approvalColors = { pending: 'orange', approved: 'green', rejected: 'red' };
+
+// Available paid/unpaid for an allocation (from the summary, which already
+// nets out active+pending blocks via blocked_shares).
+const availForAlloc = (a) => {
+  if (!a) return { paid: 0, unpaid: 0, total: 0 };
+  const paidShares = a.paid_shares || 0;
+  const unpaidShares = (a.allocated_shares || 0) - paidShares;
+  const blocked = a.blocked_shares || 0;
+  const totalAvail = Math.max(0, (a.allocated_shares || 0) - blocked);
+  return {
+    paid: Math.min(paidShares, totalAvail),
+    unpaid: Math.min(unpaidShares, totalAvail),
+    total: totalAvail,
+  };
+};
 
 export default function ShareBlocks() {
   const [data, setData] = useState([]);
@@ -54,11 +70,8 @@ export default function ShareBlocks() {
   const [shSummary, setShSummary] = useState(null);
   const [shSummaryLoading, setShSummaryLoading] = useState(false);
 
-  // Selected allocation
-  const [selectedAllocID, setSelectedAllocID] = useState(null);
-
-  // Watched form field
-  const sharesType = Form.useWatch('shares_type', form) || 'both';
+  // Watch the block lines so each line's allocation/type/availability re-render.
+  const watchedBlocks = Form.useWatch('blocks', form);
 
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [activeFilters, setActiveFilters] = useState(null);
@@ -126,14 +139,8 @@ export default function ShareBlocks() {
 
   const handleShareholderChange = async (shareholderId) => {
     setShSummary(null);
-    setSelectedAllocID(null);
-    form.setFieldsValue({
-      allocation_id: undefined,
-      block_shares: undefined,
-      paid_shares_to_block: undefined,
-      unpaid_shares_to_block: undefined,
-      block_amount_birr: undefined,
-    });
+    // Reset the block lines to a single empty line whenever the shareholder changes.
+    form.setFieldsValue({ blocks: [{ shares_type: 'both' }] });
     if (!shareholderId) return;
     setShSummaryLoading(true);
     try {
@@ -143,83 +150,47 @@ export default function ShareBlocks() {
     setShSummaryLoading(false);
   };
 
-  const handleAllocationChange = (allocId) => {
-    setSelectedAllocID(allocId);
-    form.setFieldsValue({
-      block_shares: undefined,
-      paid_shares_to_block: undefined,
-      unpaid_shares_to_block: undefined,
-      block_amount_birr: undefined,
-    });
+  // Recompute a line's block amount from its shares × par value.
+  const recalcLineAmount = (fieldName) => {
+    if (parValue <= 0) return;
+    const b = (form.getFieldValue('blocks') || [])[fieldName] || {};
+    const sType = b.shares_type || 'both';
+    const shares = sType === 'both'
+      ? (b.paid_shares_to_block || 0) + (b.unpaid_shares_to_block || 0)
+      : (b.block_shares || 0);
+    form.setFieldValue(['blocks', fieldName, 'block_amount_birr'], shares * parValue);
   };
-
-  const handleSharesTypeChange = () => {
-    form.setFieldsValue({
-      block_shares: undefined,
-      paid_shares_to_block: undefined,
-      unpaid_shares_to_block: undefined,
-      block_amount_birr: undefined,
-    });
-  };
-
-  // Auto-calculate block amount from shares × par value
-  const recalcAmount = (paidShares, unpaidShares) => {
-    if (parValue > 0) {
-      form.setFieldValue('block_amount_birr', ((paidShares || 0) + (unpaidShares || 0)) * parValue);
-    }
-  };
-
-  const handleSingleSharesChange = (val) => {
-    if (sharesType === 'paid') recalcAmount(val, 0);
-    else recalcAmount(0, val);
-  };
-
-  const handleBothSharesChange = () => {
-    const p = form.getFieldValue('paid_shares_to_block') || 0;
-    const u = form.getFieldValue('unpaid_shares_to_block') || 0;
-    recalcAmount(p, u);
-  };
-
-  // Derive selected allocation detail from summary
-  const selectedAllocDetail = shSummary?.allocations?.find(a => a.id === selectedAllocID) || null;
-
-  // Available shares per type for the selected allocation (from summary data which already includes blocked_shares)
-  const availByType = (() => {
-    if (!selectedAllocDetail) return { paid: 0, unpaid: 0 };
-    const paidShares = selectedAllocDetail.paid_shares || 0;
-    const unpaidShares = (selectedAllocDetail.allocated_shares || 0) - paidShares;
-    const blocked = selectedAllocDetail.blocked_shares || 0;
-    // blocked_shares on alloc = sum of all blocks on that alloc (precise via backend)
-    // For single-type: we approximate available by subtracting total blocked proportionally.
-    // The backend will do the precise check on submit.
-    // For the UI, we show approximate available:
-    const availPaid = Math.max(0, paidShares - blocked);   // conservative: all blocks assumed against paid
-    const availUnpaid = Math.max(0, unpaidShares - blocked); // conservative: all blocks assumed against unpaid
-    // Better: use blocked_shares as total reduction from total, cap per type
-    const totalAvail = Math.max(0, (selectedAllocDetail.allocated_shares || 0) - blocked);
-    return {
-      paid: Math.min(paidShares, totalAvail),
-      unpaid: Math.min(unpaidShares, totalAvail),
-      total: totalAvail,
-    };
-  })();
 
   const handleSubmit = async (values) => {
     try {
-      // For "both" type: compute block_shares from the two inputs
-      if (values.shares_type === 'both') {
-        values.block_shares = (values.paid_shares_to_block || 0) + (values.unpaid_shares_to_block || 0);
-      } else {
-        values.paid_shares_to_block = undefined;
-        values.unpaid_shares_to_block = undefined;
-      }
-      if (values.block_date) values.block_date = values.block_date.toISOString();
-      await createShareBlock(values);
-      message.success('Share block created');
-      setModalOpen(false);
-      form.resetFields();
-      setShSummary(null);
-      setSelectedAllocID(null);
+      const blocks = (values.blocks || []).map(b => {
+        const sType = b.shares_type || 'both';
+        const out = {
+          allocation_id: b.allocation_id,
+          shares_type: sType,
+          service_fee: b.service_fee || 0,
+          guarantee_amount: b.guarantee_amount || 0,
+          block_amount_birr: b.block_amount_birr || 0,
+        };
+        if (sType === 'both') {
+          out.paid_shares_to_block = b.paid_shares_to_block || 0;
+          out.unpaid_shares_to_block = b.unpaid_shares_to_block || 0;
+          out.block_shares = out.paid_shares_to_block + out.unpaid_shares_to_block;
+        } else {
+          out.block_shares = b.block_shares || 0;
+        }
+        return out;
+      });
+      const payload = {
+        shareholder_id: values.shareholder_id,
+        block_type: values.block_type,
+        block_date: values.block_date ? values.block_date.toISOString() : undefined,
+        reason: values.reason,
+        blocks,
+      };
+      const res = await createShareBlocksBatch(payload);
+      message.success(res.data?.message || 'Share block(s) created — pending approval');
+      resetModal();
       fetchData();
     } catch (err) {
       message.error(err.response?.data?.error || 'Failed');
@@ -227,23 +198,22 @@ export default function ShareBlocks() {
   };
 
   const handleRelease = async (id) => {
-    await releaseShareBlock(id);
-    message.success('Released');
-    fetchData();
+    try {
+      const res = await releaseShareBlock(id);
+      message.success(res.data?.message || 'Release requested — pending approval');
+      fetchData();
+    } catch (err) {
+      message.error(err.response?.data?.error || 'Failed');
+    }
   };
 
   const resetModal = () => {
     form.resetFields();
     setShSummary(null);
-    setSelectedAllocID(null);
     setModalOpen(false);
   };
 
-  // Allocation options from summary
-  const allocOptions = (shSummary?.allocations || []).map(a => ({
-    value: a.id,
-    label: `${a.allocation_no} — Rnd ${a.round} — ${a.allocated_shares} shares (${(a.payment_status || '').replace(/_/g, ' ')})`,
-  }));
+  const allocById = (id) => (shSummary?.allocations || []).find(a => a.id === id) || null;
 
   const columns = [
     { title: 'ID', dataIndex: 'id', width: 50 },
@@ -272,7 +242,6 @@ export default function ShareBlocks() {
         if (r.shares_type === 'both') {
           const p = r.paid_shares_to_block || 0;
           const u = r.unpaid_shares_to_block || 0;
-          // Legacy block: split fields are 0 even though block_shares > 0
           if (p === 0 && u === 0) {
             return <Tag color="red">{r.block_shares} (legacy block)</Tag>;
           }
@@ -288,16 +257,37 @@ export default function ShareBlocks() {
     },
     { title: 'Block Amount', dataIndex: 'block_amount_birr', render: (v) => formatCurrency(v) },
     {
+      title: 'Approval', key: 'approval', width: 130,
+      render: (_, r) => (
+        <Space direction="vertical" size={0}>
+          <Tag color={approvalColors[r.approval_status] || 'default'}>{(r.approval_status || 'pending').toUpperCase()}</Tag>
+          {r.is_release_pending && !r.is_released && <Tag color="purple" style={{ fontSize: 10 }}>RELEASE PENDING</Tag>}
+        </Space>
+      ),
+    },
+    {
       title: 'Status', key: 'status',
       render: (_, r) => <Tag color={r.is_released ? 'green' : 'red'}>{r.is_released ? 'Released' : 'Active'}</Tag>,
     },
     {
-      title: 'Actions', key: 'actions', width: 100,
-      render: (_, r) => !r.is_released && (
-        <Popconfirm title="Release this block?" onConfirm={() => handleRelease(r.id)}>
-          <Button size="small">Release</Button>
-        </Popconfirm>
-      ),
+      title: 'Actions', key: 'actions', width: 130,
+      render: (_, r) => {
+        if (r.is_released) return null;
+        if (r.is_release_pending) return <Tag color="purple">Release pending</Tag>;
+        if (r.approval_status === 'pending') return <Text type="secondary" style={{ fontSize: 12 }}>Awaiting approval</Text>;
+        if (r.approval_status === 'rejected') return null;
+        // Approved + active → release requires authorization.
+        return (
+          <Popconfirm
+            title="Request release of this block?"
+            description="This needs authorization — the shares stay blocked until the release is approved."
+            okText="Request release"
+            onConfirm={() => handleRelease(r.id)}
+          >
+            <Button size="small">Request release</Button>
+          </Popconfirm>
+        );
+      },
     },
   ];
 
@@ -307,8 +297,8 @@ export default function ShareBlocks() {
         <Title level={4} style={{ margin: 0 }}>Share Blocks</Title>
         <Button type="primary" icon={<PlusOutlined />} onClick={() => {
           form.resetFields();
+          form.setFieldsValue({ blocks: [{ shares_type: 'both' }] });
           setShSummary(null);
-          setSelectedAllocID(null);
           setModalOpen(true);
         }}>
           New Block
@@ -338,14 +328,14 @@ export default function ShareBlocks() {
       />
 
       <Table dataSource={data} columns={columns} rowKey="id" loading={loading} size="small"
-        pagination={{ current: page, total, pageSize: 20, onChange: setPage }} scroll={{ x: 1200 }} />
+        pagination={{ current: page, total, pageSize: 20, onChange: setPage }} scroll={{ x: 1300 }} />
 
       <Modal
-        title={<><LockOutlined /> New Share Block</>}
-        open={modalOpen} onCancel={resetModal} footer={null} width={760}
+        title={<><LockOutlined /> New Share Block(s)</>}
+        open={modalOpen} onCancel={resetModal} footer={null} width={820}
       >
         <Form form={form} layout="vertical" onFinish={handleSubmit}
-          initialValues={{ shares_type: 'both' }}>
+          initialValues={{ blocks: [{ shares_type: 'both' }] }}>
 
           {/* ── Shareholder ── */}
           <Form.Item name="shareholder_id" label="Shareholder" rules={[{ required: true }]}>
@@ -383,7 +373,6 @@ export default function ShareBlocks() {
                 </Col>
               </Row>
 
-              {/* Per-allocation table */}
               {(shSummary.allocations || []).length > 0 && (
                 <>
                   <Divider style={{ margin: '10px 0' }} />
@@ -430,47 +419,11 @@ export default function ShareBlocks() {
             </Card>
           )}
 
-          {/* ── Allocation Selector ── */}
-          <Form.Item name="allocation_id" label="Allocation to Block"
-            rules={[{ required: true, message: 'Select an allocation' }]}>
-            <Select
-              options={allocOptions}
-              onChange={handleAllocationChange}
-              placeholder={shSummary ? 'Select allocation…' : 'Select a shareholder first'}
-              disabled={!shSummary}
-            />
-          </Form.Item>
-
-          {/* ── Per-Allocation block availability card ── */}
-          {selectedAllocDetail && (
-            <Card size="small" style={{ marginBottom: 16, background: '#fafafa' }}
-              title={<Text strong style={{ fontSize: 13 }}>{selectedAllocDetail.allocation_no}</Text>}>
-              <Row gutter={12}>
-                <Col span={6}>
-                  <Statistic title="Allocated" value={selectedAllocDetail.allocated_shares} />
-                </Col>
-                <Col span={6}>
-                  <Statistic title="Paid Shares" value={selectedAllocDetail.paid_shares || 0}
-                    valueStyle={{ color: '#52c41a' }} />
-                </Col>
-                <Col span={6}>
-                  <Statistic title="Unpaid Shares"
-                    value={(selectedAllocDetail.allocated_shares || 0) - (selectedAllocDetail.paid_shares || 0)}
-                    valueStyle={{ color: '#fa8c16' }} />
-                </Col>
-                <Col span={6}>
-                  <Statistic title="Already Blocked" value={selectedAllocDetail.blocked_shares || 0}
-                    valueStyle={(selectedAllocDetail.blocked_shares || 0) > 0 ? { color: '#ff4d4f' } : {}} />
-                </Col>
-              </Row>
-            </Card>
-          )}
-
-          {/* ── Block Reason & Date ── */}
+          {/* ── Shared block details ── */}
           <Row gutter={16}>
             <Col span={12}>
               <Form.Item name="block_type" label="Block Reason" rules={[{ required: true }]}>
-                <Select options={blockTypes} />
+                <Select options={blockTypes} placeholder="Select reason" />
               </Form.Item>
             </Col>
             <Col span={12}>
@@ -479,145 +432,159 @@ export default function ShareBlocks() {
               </Form.Item>
             </Col>
           </Row>
-
-          {/* ── Which shares to block ── */}
-          <Form.Item name="shares_type" label="Which Shares to Block" rules={[{ required: true }]}>
-            <Radio.Group onChange={handleSharesTypeChange}>
-              <Radio.Button value="paid">Paid Shares</Radio.Button>
-              <Radio.Button value="unpaid">Unpaid Shares</Radio.Button>
-              <Radio.Button value="both">Both (Paid + Unpaid)</Radio.Button>
-            </Radio.Group>
-          </Form.Item>
-
-          {/* ── Share inputs — change by type ── */}
-          {sharesType !== 'both' ? (
-            /* Single input for "paid" or "unpaid" */
-            <Row gutter={16}>
-              <Col span={12}>
-                <Form.Item
-                  name="block_shares"
-                  label={sharesType === 'paid' ? 'Paid Shares to Block' : 'Unpaid Shares to Block'}
-                  rules={[
-                    { required: true, message: 'Required' },
-                    { type: 'number', min: 1, message: 'Must be at least 1' },
-                    {
-                      validator: (_, v) => {
-                        if (!selectedAllocDetail) return Promise.resolve();
-                        const avail = sharesType === 'paid' ? availByType.paid : availByType.unpaid;
-                        if (v > avail) return Promise.reject(`Max available: ${avail}`);
-                        return Promise.resolve();
-                      },
-                    },
-                  ]}
-                >
-                  <InputNumber
-                    style={{ width: '100%' }} min={1}
-                    max={selectedAllocDetail ? (sharesType === 'paid' ? availByType.paid : availByType.unpaid) : undefined}
-                    onChange={handleSingleSharesChange}
-                  />
-                </Form.Item>
-              </Col>
-              <Col span={12}>
-                {selectedAllocDetail && (
-                  <Alert
-                    style={{ marginTop: 30 }}
-                    type="info"
-                    message={`Available ${sharesType} shares: ${sharesType === 'paid' ? availByType.paid : availByType.unpaid}`}
-                    showIcon
-                  />
-                )}
-              </Col>
-            </Row>
-          ) : (
-            /* Two inputs for "both" */
-            <>
-              <Row gutter={16}>
-                <Col span={12}>
-                  <Form.Item
-                    name="paid_shares_to_block"
-                    label="Paid Shares to Block"
-                    rules={[
-                      { required: true, message: 'Required' },
-                      { type: 'number', min: 0, message: 'Cannot be negative' },
-                      {
-                        validator: (_, v) => {
-                          if (!selectedAllocDetail || !v) return Promise.resolve();
-                          if (v > availByType.paid) return Promise.reject(`Max available paid: ${availByType.paid}`);
-                          return Promise.resolve();
-                        },
-                      },
-                    ]}
-                  >
-                    <InputNumber
-                      style={{ width: '100%' }} min={0}
-                      max={selectedAllocDetail ? availByType.paid : undefined}
-                      onChange={handleBothSharesChange}
-                    />
-                  </Form.Item>
-                </Col>
-                <Col span={12}>
-                  <Form.Item
-                    name="unpaid_shares_to_block"
-                    label="Unpaid Shares to Block"
-                    rules={[
-                      { required: true, message: 'Required' },
-                      { type: 'number', min: 0, message: 'Cannot be negative' },
-                      {
-                        validator: (_, v) => {
-                          if (!selectedAllocDetail || !v) return Promise.resolve();
-                          if (v > availByType.unpaid) return Promise.reject(`Max available unpaid: ${availByType.unpaid}`);
-                          return Promise.resolve();
-                        },
-                      },
-                    ]}
-                  >
-                    <InputNumber
-                      style={{ width: '100%' }} min={0}
-                      max={selectedAllocDetail ? availByType.unpaid : undefined}
-                      onChange={handleBothSharesChange}
-                    />
-                  </Form.Item>
-                </Col>
-              </Row>
-              {selectedAllocDetail && (
-                <Alert
-                  style={{ marginBottom: 12 }}
-                  type="info"
-                  message={`Available — Paid: ${availByType.paid} shares | Unpaid: ${availByType.unpaid} shares`}
-                  showIcon
-                />
-              )}
-            </>
-          )}
-
-          {/* ── Amounts ── */}
-          <Row gutter={16}>
-            <Col span={12}>
-              <Form.Item
-                name="block_amount_birr"
-                label={`Block Amount (Birr)${parValue ? ` — par value: ${formatCurrency(parValue)}/share` : ''}`}
-              >
-                <InputNumber style={{ width: '100%' }} min={0} precision={2} />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="guarantee_amount" label="Guarantee Amount">
-                <InputNumber style={{ width: '100%' }} min={0} precision={2} />
-              </Form.Item>
-            </Col>
-          </Row>
-
-          <Form.Item name="service_fee" label="Service Fee">
-            <InputNumber style={{ width: '100%' }} min={0} precision={2} />
-          </Form.Item>
           <Form.Item name="reason" label="Reason / Notes">
             <Input.TextArea rows={2} />
           </Form.Item>
 
+          {/* ── Allocations to block (one or more) ── */}
+          <Divider orientation="left" style={{ margin: '8px 0' }}>Allocations to Block</Divider>
+          <Form.List name="blocks">
+            {(fields, { add, remove }) => {
+              const blocks = watchedBlocks || form.getFieldValue('blocks') || [];
+              const usedAllocIds = blocks.map(b => b?.allocation_id).filter(Boolean);
+              return (
+                <>
+                  {fields.map(field => {
+                    const line = blocks[field.name] || {};
+                    const sType = line.shares_type || 'both';
+                    const allocDetail = allocById(line.allocation_id);
+                    const avail = availForAlloc(allocDetail);
+                    const allocOpts = (shSummary?.allocations || [])
+                      .filter(a => a.id === line.allocation_id || !usedAllocIds.includes(a.id))
+                      .map(a => ({
+                        value: a.id,
+                        label: `${a.allocation_no} — Rnd ${a.round} — ${a.allocated_shares} sh (${(a.payment_status || '').replace(/_/g, ' ')})`,
+                      }));
+                    return (
+                      <Card key={field.key} size="small" style={{ marginBottom: 8, borderColor: '#722ed1' }}
+                        extra={fields.length > 1 && (
+                          <Button type="text" danger size="small" icon={<DeleteOutlined />}
+                            onClick={() => remove(field.name)}>Remove</Button>
+                        )}>
+                        <Form.Item name={[field.name, 'allocation_id']} label="Allocation"
+                          rules={[{ required: true, message: 'Select an allocation' }]}
+                          style={{ marginBottom: 8 }}>
+                          <Select
+                            options={allocOpts}
+                            placeholder={shSummary ? 'Select allocation…' : 'Select a shareholder first'}
+                            disabled={!shSummary}
+                            onChange={() => {
+                              form.setFieldsValue({ blocks: blocks.map((b, i) => i === field.name
+                                ? { ...b, block_shares: undefined, paid_shares_to_block: undefined, unpaid_shares_to_block: undefined, block_amount_birr: undefined }
+                                : b) });
+                            }}
+                          />
+                        </Form.Item>
+
+                        {allocDetail && (
+                          <Row gutter={12} style={{ marginBottom: 8 }}>
+                            <Col span={6}><Statistic title="Allocated" value={allocDetail.allocated_shares} valueStyle={{ fontSize: 14 }} /></Col>
+                            <Col span={6}><Statistic title="Avail paid" value={avail.paid} valueStyle={{ fontSize: 14, color: '#52c41a' }} /></Col>
+                            <Col span={6}><Statistic title="Avail unpaid" value={avail.unpaid} valueStyle={{ fontSize: 14, color: '#fa8c16' }} /></Col>
+                            <Col span={6}><Statistic title="Already blocked" value={allocDetail.blocked_shares || 0} valueStyle={{ fontSize: 14, color: (allocDetail.blocked_shares || 0) > 0 ? '#ff4d4f' : undefined }} /></Col>
+                          </Row>
+                        )}
+
+                        <Form.Item name={[field.name, 'shares_type']} label="Which Shares to Block"
+                          rules={[{ required: true }]} style={{ marginBottom: 8 }}>
+                          <Radio.Group onChange={() => {
+                            form.setFieldsValue({ blocks: blocks.map((b, i) => i === field.name
+                              ? { ...b, block_shares: undefined, paid_shares_to_block: undefined, unpaid_shares_to_block: undefined, block_amount_birr: undefined }
+                              : b) });
+                          }} size="small">
+                            <Radio.Button value="paid">Paid</Radio.Button>
+                            <Radio.Button value="unpaid">Unpaid</Radio.Button>
+                            <Radio.Button value="both">Both</Radio.Button>
+                          </Radio.Group>
+                        </Form.Item>
+
+                        {sType !== 'both' ? (
+                          <Form.Item
+                            name={[field.name, 'block_shares']}
+                            label={`${sType === 'paid' ? 'Paid' : 'Unpaid'} shares to block (max ${sType === 'paid' ? avail.paid : avail.unpaid})`}
+                            rules={[
+                              { required: true, message: 'Required' },
+                              { type: 'number', min: 1, message: 'Must be at least 1' },
+                              {
+                                validator: (_, v) => {
+                                  if (!allocDetail || v == null) return Promise.resolve();
+                                  const max = sType === 'paid' ? avail.paid : avail.unpaid;
+                                  if (v > max) return Promise.reject(new Error(`Max available: ${max}`));
+                                  return Promise.resolve();
+                                },
+                              },
+                            ]}
+                            style={{ marginBottom: 8 }}>
+                            <InputNumber style={{ width: '100%' }} min={1} precision={0}
+                              onChange={() => recalcLineAmount(field.name)} />
+                          </Form.Item>
+                        ) : (
+                          <Row gutter={16}>
+                            <Col span={12}>
+                              <Form.Item name={[field.name, 'paid_shares_to_block']} label={`Paid shares (max ${avail.paid})`}
+                                rules={[
+                                  { type: 'number', min: 0, message: 'Cannot be negative' },
+                                  { validator: (_, v) => (!allocDetail || !v || v <= avail.paid) ? Promise.resolve() : Promise.reject(new Error(`Max paid: ${avail.paid}`)) },
+                                ]}
+                                style={{ marginBottom: 8 }}>
+                                <InputNumber style={{ width: '100%' }} min={0} precision={0}
+                                  onChange={() => recalcLineAmount(field.name)} />
+                              </Form.Item>
+                            </Col>
+                            <Col span={12}>
+                              <Form.Item name={[field.name, 'unpaid_shares_to_block']} label={`Unpaid shares (max ${avail.unpaid})`}
+                                rules={[
+                                  { type: 'number', min: 0, message: 'Cannot be negative' },
+                                  { validator: (_, v) => (!allocDetail || !v || v <= avail.unpaid) ? Promise.resolve() : Promise.reject(new Error(`Max unpaid: ${avail.unpaid}`)) },
+                                ]}
+                                style={{ marginBottom: 8 }}>
+                                <InputNumber style={{ width: '100%' }} min={0} precision={0}
+                                  onChange={() => recalcLineAmount(field.name)} />
+                              </Form.Item>
+                            </Col>
+                          </Row>
+                        )}
+
+                        <Row gutter={16}>
+                          <Col span={8}>
+                            <Form.Item name={[field.name, 'block_amount_birr']}
+                              label={`Block Amount${parValue ? ` (par ${formatCurrency(parValue)})` : ''}`} style={{ marginBottom: 0 }}>
+                              <InputNumber style={{ width: '100%' }} min={0} precision={2} />
+                            </Form.Item>
+                          </Col>
+                          <Col span={8}>
+                            <Form.Item name={[field.name, 'service_fee']} label="Service Fee" style={{ marginBottom: 0 }}>
+                              <InputNumber style={{ width: '100%' }} min={0} precision={2} />
+                            </Form.Item>
+                          </Col>
+                          <Col span={8}>
+                            <Form.Item name={[field.name, 'guarantee_amount']} label="Guarantee Amount" style={{ marginBottom: 0 }}>
+                              <InputNumber style={{ width: '100%' }} min={0} precision={2} />
+                            </Form.Item>
+                          </Col>
+                        </Row>
+                      </Card>
+                    );
+                  })}
+                  <Button type="dashed" block icon={<PlusOutlined />}
+                    disabled={!shSummary || fields.length >= (shSummary?.allocations?.length || 0)}
+                    onClick={() => add({ shares_type: 'both' })}>
+                    Add another allocation
+                  </Button>
+                </>
+              );
+            }}
+          </Form.List>
+
+          <Alert
+            type="info" showIcon style={{ margin: '12px 0' }}
+            message="Block and release both require authorization — created blocks stay pending until approved, and releasing a block must also be approved."
+          />
+
           <Form.Item style={{ textAlign: 'right', marginBottom: 0 }}>
             <Space>
               <Button onClick={resetModal}>Cancel</Button>
-              <Button type="primary" htmlType="submit" icon={<LockOutlined />}>Create Block</Button>
+              <Button type="primary" htmlType="submit" icon={<LockOutlined />}>Create Block(s)</Button>
             </Space>
           </Form.Item>
         </Form>

@@ -286,6 +286,7 @@ func main() {
 		api.GET("/share-blocks", handlers.GetShareBlocks)
 		api.GET("/share-blocks/:id", handlers.GetShareBlock)
 		api.POST("/share-blocks", handlers.CreateShareBlock)
+		api.POST("/share-blocks/batch", handlers.CreateShareBlocksBatch)
 		api.POST("/share-blocks/:id/release", handlers.ReleaseShareBlock)
 
 		// Certificates

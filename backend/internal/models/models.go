@@ -344,6 +344,10 @@ type ShareBlock struct {
 	Reason          string     `gorm:"type:text" json:"reason"`
 	ReleaseDate     *time.Time `json:"release_date"`
 	IsReleased      bool       `gorm:"default:false" json:"is_released"`
+	// IsReleasePending is set when a release has been requested and is awaiting
+	// authorization. The block stays effective (shares stay reserved) until the
+	// release is approved; rejecting the release clears this flag.
+	IsReleasePending bool      `gorm:"default:false" json:"is_release_pending"`
 	Status          string     `gorm:"size:30;default:'active'" json:"status"`
 	ApprovalStatus  string     `gorm:"size:30;default:'pending'" json:"approval_status"`
 	RejectionReason string     `gorm:"type:text" json:"rejection_reason"`

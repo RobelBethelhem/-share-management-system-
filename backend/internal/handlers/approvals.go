@@ -76,7 +76,18 @@ func ApproveItem(c *gin.Context) {
 	case "subscription":
 		database.DB.Model(&models.Subscription{}).Where("id = ?", approval.EntityID).Update("approval_status", "approved")
 	case "block":
-		database.DB.Model(&models.ShareBlock{}).Where("id = ?", approval.EntityID).Update("approval_status", "approved")
+		if approval.Action == "release" {
+			if err := RunBlockRelease(approval.EntityID); err != nil {
+				approval.Status = "pending"
+				approval.ApprovedBy = nil
+				approval.ProcessedAt = nil
+				database.DB.Save(&approval)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Block release failed: " + err.Error()})
+				return
+			}
+		} else {
+			database.DB.Model(&models.ShareBlock{}).Where("id = ?", approval.EntityID).Update("approval_status", "approved")
+		}
 	case "dividend":
 		if approval.Action == "transfer" {
 			// Execute the pending dividend transfer. Log a final "transfer"
@@ -260,7 +271,18 @@ func ApproveByEntity(c *gin.Context) {
 	case "subscription":
 		database.DB.Model(&models.Subscription{}).Where("id = ?", approval.EntityID).Update("approval_status", "approved")
 	case "block":
-		database.DB.Model(&models.ShareBlock{}).Where("id = ?", approval.EntityID).Update("approval_status", "approved")
+		if approval.Action == "release" {
+			if err := RunBlockRelease(approval.EntityID); err != nil {
+				approval.Status = "pending"
+				approval.ApprovedBy = nil
+				approval.ProcessedAt = nil
+				database.DB.Save(&approval)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Block release failed: " + err.Error()})
+				return
+			}
+		} else {
+			database.DB.Model(&models.ShareBlock{}).Where("id = ?", approval.EntityID).Update("approval_status", "approved")
+		}
 	case "dividend":
 		if approval.Action == "transfer" {
 			// Execute the pending dividend transfer. Log a final "transfer"
@@ -352,7 +374,12 @@ func RejectByEntity(c *gin.Context) {
 	case "subscription":
 		database.DB.Model(&models.Subscription{}).Where("id = ?", approval.EntityID).Updates(rejUpdate)
 	case "block":
-		database.DB.Model(&models.ShareBlock{}).Where("id = ?", approval.EntityID).Updates(rejUpdate)
+		if approval.Action == "release" {
+			// Release rejected — the block stays active; just clear the flag.
+			database.DB.Model(&models.ShareBlock{}).Where("id = ?", approval.EntityID).Update("is_release_pending", false)
+		} else {
+			database.DB.Model(&models.ShareBlock{}).Where("id = ?", approval.EntityID).Updates(rejUpdate)
+		}
 	case "dividend":
 		if approval.Action == "transfer" {
 			// Clear the pending transfer state; the dividend stays in its
@@ -431,7 +458,12 @@ func RejectItem(c *gin.Context) {
 	case "subscription":
 		database.DB.Model(&models.Subscription{}).Where("id = ?", approval.EntityID).Updates(rejUpdate)
 	case "block":
-		database.DB.Model(&models.ShareBlock{}).Where("id = ?", approval.EntityID).Updates(rejUpdate)
+		if approval.Action == "release" {
+			// Release rejected — the block stays active; just clear the flag.
+			database.DB.Model(&models.ShareBlock{}).Where("id = ?", approval.EntityID).Update("is_release_pending", false)
+		} else {
+			database.DB.Model(&models.ShareBlock{}).Where("id = ?", approval.EntityID).Updates(rejUpdate)
+		}
 	case "dividend":
 		if approval.Action == "transfer" {
 			// Clear the pending transfer state; the dividend stays in its

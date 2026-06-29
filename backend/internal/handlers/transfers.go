@@ -92,7 +92,7 @@ func GetTransfer(c *gin.Context) {
 	id := c.Param("id")
 	var transfer models.Transfer
 	if err := database.DB.Preload("Transferor").Preload("Transferee").
-		Preload("Lines.FromAllocation").First(&transfer, id).Error; err != nil {
+		Preload("Lines.FromAllocation").Preload("Lines.FromInvestment").First(&transfer, id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Transfer not found"})
 		return
 	}
@@ -480,6 +480,7 @@ func CreateTransfer(c *gin.Context) {
 		database.DB.Create(&models.TransferLine{
 			TransferID:             transfer.ID,
 			FromAllocationID:       line.FromAllocationID,
+			FromInvestmentID:       line.FromInvestmentID,
 			PaidSharesToTransfer:   line.PaidSharesToTransfer,
 			UnpaidSharesToTransfer: line.UnpaidSharesToTransfer,
 		})
@@ -521,6 +522,11 @@ func RunTransferApproval(transferID uint) error {
 	// then T1 was approved first and ate the shared paid pool. Without this,
 	// approving T2 would silently drive the allocation's effective paid
 	// count negative.
+	// Aggregate per allocation across this transfer's lines — a transfer may
+	// have several lines on one allocation (different payment cohorts), so the
+	// re-check must compare the COMBINED demand, not each line alone.
+	apprConsumedPaid := map[uint]int64{}
+	apprConsumedUnpaid := map[uint]int64{}
 	for _, line := range transfer.Lines {
 		var alloc models.Allocation
 		if err := database.DB.First(&alloc, line.FromAllocationID).Error; err != nil {
@@ -552,15 +558,17 @@ func RunTransferApproval(transferID uint) error {
 		if availUnpaid < 0 {
 			availUnpaid = 0
 		}
-		if line.PaidSharesToTransfer > availPaid {
+		apprConsumedPaid[alloc.ID] += line.PaidSharesToTransfer
+		apprConsumedUnpaid[alloc.ID] += line.UnpaidSharesToTransfer
+		if apprConsumedPaid[alloc.ID] > availPaid {
 			return fmt.Errorf(
-				"approval blocked: allocation %s — paid shares to transfer (%d) exceeds currently available (%d). Another transfer was approved between create and now, eating this allocation's paid capacity. Reject this transfer or wait until the prior approvals settle.",
-				alloc.AllocationNo, line.PaidSharesToTransfer, availPaid)
+				"approval blocked: allocation %s — paid shares to transfer (%d total across lines) exceeds currently available (%d). Another transfer was approved between create and now, eating this allocation's paid capacity. Reject this transfer or wait until the prior approvals settle.",
+				alloc.AllocationNo, apprConsumedPaid[alloc.ID], availPaid)
 		}
-		if line.UnpaidSharesToTransfer > availUnpaid {
+		if apprConsumedUnpaid[alloc.ID] > availUnpaid {
 			return fmt.Errorf(
-				"approval blocked: allocation %s — unpaid shares to transfer (%d) exceeds currently available (%d).",
-				alloc.AllocationNo, line.UnpaidSharesToTransfer, availUnpaid)
+				"approval blocked: allocation %s — unpaid shares to transfer (%d total across lines) exceeds currently available (%d).",
+				alloc.AllocationNo, apprConsumedUnpaid[alloc.ID], availUnpaid)
 		}
 	}
 

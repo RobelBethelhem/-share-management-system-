@@ -400,14 +400,32 @@ function TransferBody({ detail }) {
 
       {Array.isArray(detail.lines) && detail.lines.length > 0 && (
         <>
-          <Divider orientation="left" style={{ margin: '8px 0' }}>Source Allocations</Divider>
+          <Divider orientation="left" style={{ margin: '8px 0' }}>Source Payments</Divider>
           <Table
             dataSource={detail.lines}
             rowKey="id"
             size="small"
             pagination={false}
             columns={[
-              { title: 'Allocation', dataIndex: 'from_allocation_id', render: (v) => `#${v}` },
+              {
+                title: 'Allocation',
+                key: 'alloc',
+                render: (_, r) => r.from_allocation?.allocation_no
+                  ? <Tag color="purple">{r.from_allocation.allocation_no}{r.from_allocation.round != null ? ` · Rnd ${r.from_allocation.round}` : ''}</Tag>
+                  : `#${r.from_allocation_id}`,
+              },
+              {
+                // The specific purchase this line sells from (its payment date
+                // is the dividend-from floor). Falls back to the allocation's
+                // acquisition date for whole-allocation / unpaid / legacy lines.
+                title: 'Purchase Date',
+                key: 'purchase',
+                render: (_, r) => r.from_investment?.payment_date
+                  ? <Text>{fmtDate(r.from_investment.payment_date)}</Text>
+                  : (r.from_allocation?.allocation_date
+                      ? <Text type="secondary">{fmtDate(r.from_allocation.allocation_date)} <Text type="secondary" style={{ fontSize: 11 }}>(allocation)</Text></Text>
+                      : <Text type="secondary">—</Text>),
+              },
               { title: 'Paid Shares', dataIndex: 'paid_shares_to_transfer', render: formatN },
               { title: 'Unpaid Shares', dataIndex: 'unpaid_shares_to_transfer', render: formatN },
             ]}

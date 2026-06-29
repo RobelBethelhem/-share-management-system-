@@ -227,11 +227,17 @@ type TransferLine struct {
 	ID                     uint      `gorm:"primaryKey" json:"id"`
 	TransferID             uint      `gorm:"index;not null" json:"transfer_id"`
 	FromAllocationID       uint      `gorm:"index;not null" json:"from_allocation_id"`
+	// FromInvestmentID is the specific paid payment (cohort) this line sells
+	// from, when the source was chosen by payment. Null for whole-allocation
+	// ("All paid") / unpaid / legacy lines. Recorded for the audit/approval
+	// view so an approver sees exactly which purchase (and its date) moved.
+	FromInvestmentID       *uint     `gorm:"index" json:"from_investment_id"`
 	PaidSharesToTransfer   int64     `json:"paid_shares_to_transfer"`
 	UnpaidSharesToTransfer int64     `json:"unpaid_shares_to_transfer"`
 	CreatedAt              time.Time `json:"created_at"`
 
-	FromAllocation Allocation `gorm:"foreignKey:FromAllocationID" json:"from_allocation,omitempty"`
+	FromAllocation Allocation  `gorm:"foreignKey:FromAllocationID" json:"from_allocation,omitempty"`
+	FromInvestment *Investment `gorm:"foreignKey:FromInvestmentID" json:"from_investment,omitempty"`
 }
 
 // DividendSetting represents fiscal year dividend configuration

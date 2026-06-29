@@ -96,6 +96,9 @@ export default function Transfers() {
   // Watch the two party ids so each Select can exclude the other party.
   const watchedTransferor = Form.useWatch('transferor_id', form);
   const watchedTransferee = Form.useWatch('transferee_id', form);
+  // Watch the source lines so each line's cap re-computes live as sibling lines
+  // on the same allocation consume from the shared paid/unpaid pool.
+  const watchedLines = Form.useWatch('lines', form);
 
   // Fetch par value from bank capital settings
   useEffect(() => {
@@ -207,12 +210,16 @@ export default function Transfers() {
       const pays = (transferorPayments || [])
         .filter(p => p.allocation_id === a.id && (p.number_of_shares || 0) > 0)
         .sort((x, y) => dayjs(x.payment_date).valueOf() - dayjs(y.payment_date).valueOf());
+      // selfMax = the cohort's own hard limit (a payment's own shares, or the
+      // pool size); availPaid/availUnpaid let each line subtract what sibling
+      // lines on the same allocation already consumed from the shared pool.
       for (const p of pays) {
         const cap = Math.min(p.number_of_shares, availPaid);
         if (cap <= 0) continue;
         out.push({
           key: `paid-${p.id}`, kind: 'paid', allocationId: a.id, allocationNo: a.allocation_no,
           round: a.round, investmentId: p.id, date: p.payment_date, shares: cap,
+          selfMax: p.number_of_shares, availPaid, availUnpaid,
           label: `${a.allocation_no} · Payment ${dayjs(p.payment_date).format('YYYY-MM-DD')} · ${(p.number_of_shares).toLocaleString()} sh${p.payment_method ? ` (${p.payment_method})` : ''}${cap < p.number_of_shares ? ` — ${cap.toLocaleString()} avail` : ''}`,
         });
       }
@@ -220,6 +227,7 @@ export default function Transfers() {
         out.push({
           key: `allpaid-${a.id}`, kind: 'allpaid', allocationId: a.id, allocationNo: a.allocation_no,
           round: a.round, investmentId: null, date: acq, shares: availPaid,
+          selfMax: availPaid, availPaid, availUnpaid,
           label: `${a.allocation_no} · All paid · ${availPaid.toLocaleString()} sh${acq ? ` · since ${dayjs(acq).format('YYYY-MM-DD')}` : ''}`,
         });
       }
@@ -227,6 +235,7 @@ export default function Transfers() {
         out.push({
           key: `unpaid-${a.id}`, kind: 'unpaid', allocationId: a.id, allocationNo: a.allocation_no,
           round: a.round, investmentId: null, date: acq, shares: availUnpaid,
+          selfMax: availUnpaid, availPaid, availUnpaid,
           label: `${a.allocation_no} · Unpaid (subscribed) · ${availUnpaid.toLocaleString()} sh`,
         });
       }
@@ -852,6 +861,25 @@ export default function Transfers() {
                           })
                           .map(c => ({ value: c.key, label: c.label }));
 
+                        // Live remaining cap for the selected cohort: its own
+                        // limit minus what sibling lines on the SAME allocation
+                        // already drew from the shared paid/unpaid pool.
+                        let effCap = 0;
+                        if (cohort) {
+                          let siblingPaid = 0, siblingUnpaid = 0;
+                          (watchedLines || []).forEach((ln, idx) => {
+                            const k = fieldKeysRef.current[idx];
+                            if (!k || k === field.key) return;
+                            const c = lineCohorts[k];
+                            if (!c || c.allocationId !== cohort.allocationId) return;
+                            if (c.kind === 'unpaid') siblingUnpaid += Number(ln?.unpaid_shares_to_transfer || 0);
+                            else siblingPaid += Number(ln?.paid_shares_to_transfer || 0);
+                          });
+                          const poolAvail = cohort.kind === 'unpaid' ? cohort.availUnpaid : cohort.availPaid;
+                          const siblingUsed = cohort.kind === 'unpaid' ? siblingUnpaid : siblingPaid;
+                          effCap = Math.max(0, Math.min(cohort.selfMax, poolAvail - siblingUsed));
+                        }
+
                         return (
                           <Card key={field.key} size="small"
                             style={{ marginBottom: 8, borderColor: '#722ed1' }}
@@ -895,7 +923,12 @@ export default function Transfers() {
                                     <Text type="secondary" style={{ fontSize: 11 }}>
                                       {cohort.kind === 'unpaid' ? 'UNPAID (SUBSCRIBED)' : 'PAID'} AVAILABLE
                                     </Text>
-                                    <div><Text strong style={{ color: cohort.kind === 'unpaid' ? '#faad14' : '#52c41a' }}>{cohort.shares.toLocaleString()} shares</Text></div>
+                                    <div>
+                                      <Text strong style={{ color: cohort.kind === 'unpaid' ? '#faad14' : '#52c41a' }}>{effCap.toLocaleString()} shares</Text>
+                                      {effCap < cohort.shares && (
+                                        <Text type="secondary" style={{ fontSize: 11, marginLeft: 4 }}>(of {cohort.shares.toLocaleString()}, rest on other lines)</Text>
+                                      )}
+                                    </div>
                                   </Col>
                                   <Col span={8}>
                                     <Text type="secondary" style={{ fontSize: 11 }}>DIVIDEND-FROM FLOOR</Text>
@@ -905,7 +938,7 @@ export default function Transfers() {
 
                                 <Form.Item
                                   name={[field.name, cohort.kind === 'unpaid' ? 'unpaid_shares_to_transfer' : 'paid_shares_to_transfer']}
-                                  label={`Shares to transfer (max ${cohort.shares.toLocaleString()})`}
+                                  label={`Shares to transfer (max ${effCap.toLocaleString()})`}
                                   validateFirst
                                   rules={[
                                     { required: true, message: 'Required' },
@@ -913,7 +946,7 @@ export default function Transfers() {
                                       validator: (_, v) => {
                                         if (v == null || v === '') return Promise.resolve();
                                         if (v < 1) return Promise.reject(new Error('Must be at least 1'));
-                                        if (v > cohort.shares) return Promise.reject(new Error(`Cannot exceed available ${cohort.shares.toLocaleString()} shares. Reduce the amount.`));
+                                        if (v > effCap) return Promise.reject(new Error(`Cannot exceed available ${effCap.toLocaleString()} shares (the rest of this allocation is on other lines). Reduce the amount.`));
                                         return Promise.resolve();
                                       },
                                     },

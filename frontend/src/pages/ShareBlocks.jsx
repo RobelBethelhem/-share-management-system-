@@ -70,8 +70,11 @@ export default function ShareBlocks() {
   const [shSummary, setShSummary] = useState(null);
   const [shSummaryLoading, setShSummaryLoading] = useState(false);
 
-  // Watch the block lines so each line's allocation/type/availability re-render.
-  const watchedBlocks = Form.useWatch('blocks', form);
+  // Per-line selection (field.key → { allocId, sharesType }). State-driven so
+  // selecting an allocation / shares-type reliably re-renders the line (and so
+  // availability + the "no duplicate allocation" filter actually update) — a
+  // Form.useWatch on the nested list value did not re-render dependably.
+  const [lineSel, setLineSel] = useState({});
 
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [activeFilters, setActiveFilters] = useState(null);
@@ -141,6 +144,7 @@ export default function ShareBlocks() {
     setShSummary(null);
     // Reset the block lines to a single empty line whenever the shareholder changes.
     form.setFieldsValue({ blocks: [{ shares_type: 'both' }] });
+    setLineSel({});
     if (!shareholderId) return;
     setShSummaryLoading(true);
     try {
@@ -220,6 +224,7 @@ export default function ShareBlocks() {
   const resetModal = () => {
     form.resetFields();
     setShSummary(null);
+    setLineSel({});
     setModalOpen(false);
   };
 
@@ -309,6 +314,7 @@ export default function ShareBlocks() {
           form.resetFields();
           form.setFieldsValue({ blocks: [{ shares_type: 'both' }] });
           setShSummary(null);
+          setLineSel({});
           setModalOpen(true);
         }}>
           New Block
@@ -450,17 +456,22 @@ export default function ShareBlocks() {
           <Divider orientation="left" style={{ margin: '8px 0' }}>Allocations to Block</Divider>
           <Form.List name="blocks">
             {(fields, { add, remove }) => {
-              const blocks = watchedBlocks || form.getFieldValue('blocks') || [];
-              const usedAllocIds = blocks.map(b => b?.allocation_id).filter(Boolean);
+              // Allocations already chosen on OTHER lines — excluded from each
+              // line's dropdown so the same allocation can't be blocked twice.
+              const allUsedAllocIds = Object.values(lineSel).map(s => s?.allocId).filter(Boolean);
               return (
                 <>
                   {fields.map(field => {
-                    const line = blocks[field.name] || {};
-                    const sType = line.shares_type || 'both';
-                    const allocDetail = allocById(line.allocation_id);
+                    const sel = lineSel[field.key] || {};
+                    const sType = sel.sharesType || 'both';
+                    const allocDetail = allocById(sel.allocId);
                     const avail = availForAlloc(allocDetail);
+                    const usedAllocIds = Object.entries(lineSel)
+                      .filter(([k]) => k !== String(field.key))
+                      .map(([, s]) => s?.allocId)
+                      .filter(Boolean);
                     const allocOpts = (shSummary?.allocations || [])
-                      .filter(a => a.id === line.allocation_id || !usedAllocIds.includes(a.id))
+                      .filter(a => a.id === sel.allocId || !usedAllocIds.includes(a.id))
                       .map(a => ({
                         value: a.id,
                         label: `${a.allocation_no} — Rnd ${a.round} — ${a.allocated_shares} sh (${(a.payment_status || '').replace(/_/g, ' ')})`,
@@ -469,7 +480,10 @@ export default function ShareBlocks() {
                       <Card key={field.key} size="small" style={{ marginBottom: 8, borderColor: '#722ed1' }}
                         extra={fields.length > 1 && (
                           <Button type="text" danger size="small" icon={<DeleteOutlined />}
-                            onClick={() => remove(field.name)}>Remove</Button>
+                            onClick={() => {
+                              remove(field.name);
+                              setLineSel(prev => { const n = { ...prev }; delete n[field.key]; return n; });
+                            }}>Remove</Button>
                         )}>
                         <Form.Item name={[field.name, 'allocation_id']} label="Allocation"
                           rules={[{ required: true, message: 'Select an allocation' }]}
@@ -478,7 +492,10 @@ export default function ShareBlocks() {
                             options={allocOpts}
                             placeholder={shSummary ? 'Select allocation…' : 'Select a shareholder first'}
                             disabled={!shSummary}
-                            onChange={() => clearLineShares(field.name)}
+                            onChange={(v) => {
+                              setLineSel(prev => ({ ...prev, [field.key]: { ...prev[field.key], allocId: v } }));
+                              clearLineShares(field.name);
+                            }}
                           />
                         </Form.Item>
 
@@ -493,7 +510,12 @@ export default function ShareBlocks() {
 
                         <Form.Item name={[field.name, 'shares_type']} label="Which Shares to Block"
                           rules={[{ required: true }]} style={{ marginBottom: 8 }}>
-                          <Radio.Group onChange={() => clearLineShares(field.name)} size="small">
+                          <Radio.Group
+                            onChange={(e) => {
+                              setLineSel(prev => ({ ...prev, [field.key]: { ...prev[field.key], sharesType: e.target.value } }));
+                              clearLineShares(field.name);
+                            }}
+                            size="small">
                             <Radio.Button value="paid">Paid</Radio.Button>
                             <Radio.Button value="unpaid">Unpaid</Radio.Button>
                             <Radio.Button value="both">Both</Radio.Button>

@@ -161,6 +161,16 @@ export default function ShareBlocks() {
     form.setFieldValue(['blocks', fieldName, 'block_amount_birr'], shares * parValue);
   };
 
+  // Clear just THIS line's share/amount fields (used when its allocation or
+  // shares-type changes) without rebuilding the whole blocks array — that
+  // could clobber sibling lines being edited.
+  const clearLineShares = (fieldName) => {
+    form.setFieldValue(['blocks', fieldName, 'block_shares'], undefined);
+    form.setFieldValue(['blocks', fieldName, 'paid_shares_to_block'], undefined);
+    form.setFieldValue(['blocks', fieldName, 'unpaid_shares_to_block'], undefined);
+    form.setFieldValue(['blocks', fieldName, 'block_amount_birr'], undefined);
+  };
+
   const handleSubmit = async (values) => {
     try {
       const blocks = (values.blocks || []).map(b => {
@@ -468,11 +478,7 @@ export default function ShareBlocks() {
                             options={allocOpts}
                             placeholder={shSummary ? 'Select allocation…' : 'Select a shareholder first'}
                             disabled={!shSummary}
-                            onChange={() => {
-                              form.setFieldsValue({ blocks: blocks.map((b, i) => i === field.name
-                                ? { ...b, block_shares: undefined, paid_shares_to_block: undefined, unpaid_shares_to_block: undefined, block_amount_birr: undefined }
-                                : b) });
-                            }}
+                            onChange={() => clearLineShares(field.name)}
                           />
                         </Form.Item>
 
@@ -487,11 +493,7 @@ export default function ShareBlocks() {
 
                         <Form.Item name={[field.name, 'shares_type']} label="Which Shares to Block"
                           rules={[{ required: true }]} style={{ marginBottom: 8 }}>
-                          <Radio.Group onChange={() => {
-                            form.setFieldsValue({ blocks: blocks.map((b, i) => i === field.name
-                              ? { ...b, block_shares: undefined, paid_shares_to_block: undefined, unpaid_shares_to_block: undefined, block_amount_birr: undefined }
-                              : b) });
-                          }} size="small">
+                          <Radio.Group onChange={() => clearLineShares(field.name)} size="small">
                             <Radio.Button value="paid">Paid</Radio.Button>
                             <Radio.Button value="unpaid">Unpaid</Radio.Button>
                             <Radio.Button value="both">Both</Radio.Button>

@@ -21,12 +21,22 @@ func GetDividendSettings(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": settings})
 }
 
-// truncToDay strips the time-of-day from a timestamp so date arithmetic is
-// exact regardless of any hour/minute component a stored value may carry
-// (e.g. a transfer recorded at 14:00). Truncation happens in the value's own
-// location, matching how the dividend breakdown audit view normalises dates.
+// businessTZ is East Africa Time (UTC+3, no DST) — the timezone every date in
+// the system is entered in. Depending on the client, a date may be persisted as
+// EAT-midnight (…T00:00+03 → …T21:00Z the day before) OR as UTC-midnight
+// (…T00:00Z). Both represent the SAME calendar day the operator picked, but
+// truncating them in UTC would land on different days and miscount by one (e.g.
+// a payment at 2026-06-29T00:00Z and a reference at 2026-06-29T21:00Z both fall
+// on the 29th in UTC, so a Jun-29→Jun-30 holding counts 1 day instead of 2).
+var businessTZ = time.FixedZone("EAT", 3*60*60)
+
+// truncToDay strips the time-of-day, normalising to the business timezone first
+// so two timestamps always compare on the calendar day the operator actually
+// entered — regardless of whether each was stored at EAT-midnight or
+// UTC-midnight.
 func truncToDay(t time.Time) time.Time {
-	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+	t = t.In(businessTZ)
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, businessTZ)
 }
 
 // wholeDaysHeld returns the whole days a position is held for dividend

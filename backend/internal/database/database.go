@@ -96,9 +96,59 @@ func Initialize(cfg *config.Config) *gorm.DB {
 	DB.Exec("ALTER TABLE agm_proxies DROP COLUMN proxy_shareholder_id")
 
 	SeedDefaultData(DB)
+	backfillLegacyTransferAllocations(DB)
 
 	fmt.Println("Database connected and migrated successfully")
 	return DB
+}
+
+// backfillLegacyTransferAllocations creates an Allocation for every approved
+// transfer_in Investment that has no allocation link. Legacy transfers and
+// marketplace trades used to hand the transferee a bare investment row, which
+// left those shares invisible to everything allocation-scoped: capital-increase
+// basis, share blocks, and per-allocation transfers. AllocatedAmount matches the
+// investment amount so the new allocation reads fully paid. Idempotent: linked
+// rows are skipped on the next run.
+func backfillLegacyTransferAllocations(db *gorm.DB) {
+	var orphans []models.Investment
+	db.Where("allocation_id IS NULL AND payment_method = 'transfer_in' AND status = 'active' AND approval_status = 'approved' AND number_of_shares > 0").
+		Find(&orphans)
+	if len(orphans) == 0 {
+		return
+	}
+	var par float64
+	var bc models.BankCapital
+	if err := db.First(&bc).Error; err == nil {
+		par = bc.ParValuePerShare
+	}
+	linked := 0
+	for _, inv := range orphans {
+		amount := inv.Amount
+		if amount <= 0 {
+			amount = float64(inv.NumberOfShares) * par
+		}
+		alloc := models.Allocation{
+			ShareholderID:   inv.ShareholderID,
+			AllocationNo:    fmt.Sprintf("TALLOC-L-%d", inv.ID),
+			Round:           1,
+			AllocatedShares: inv.NumberOfShares,
+			AllocatedAmount: amount,
+			AllocationDate:  inv.PaymentDate,
+			Status:          "allocated",
+			ApprovalStatus:  "approved",
+		}
+		if err := db.Create(&alloc).Error; err != nil {
+			log.Printf("backfill: allocation create failed for investment %d: %v", inv.ID, err)
+			continue
+		}
+		if err := db.Model(&models.Investment{}).Where("id = ?", inv.ID).
+			Update("allocation_id", alloc.ID).Error; err != nil {
+			log.Printf("backfill: link failed for investment %d: %v", inv.ID, err)
+			continue
+		}
+		linked++
+	}
+	fmt.Printf("Backfilled %d legacy transfer_in allocation link(s)\n", linked)
 }
 
 // SeedDefaultData populates default system settings, tax schedules, bank

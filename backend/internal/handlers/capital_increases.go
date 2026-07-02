@@ -58,6 +58,28 @@ func ciBaseBreakdownFor(ciID uint, round int, shareholderID uint) ciBaseBreakdow
 		b.TotalAllocatedShares += a.AllocatedShares
 		b.PaidShares += computeAllocPaidShares(shareholderID, a.ID)
 	}
+
+	// Shares moved by LEGACY transfers (no allocation link): the transferee's
+	// transfer_in (+shares) has no allocation row, and the transferor's
+	// allocations were never shrunk — their transfer_out (−shares) is the only
+	// record. Both are invisible to the allocation sum above, so a shareholder
+	// who joined purely by transfer would get basis 0 and be excluded from the
+	// capital increase. Add the net unlinked transfer share delta so transfer-
+	// received shares count as basis (and legacy transferors aren't overstated).
+	var unlinkedTransferShares int64
+	database.DB.Model(&models.Investment{}).
+		Where("shareholder_id = ? AND status = 'active' AND approval_status = 'approved' AND allocation_id IS NULL AND payment_method IN ('transfer_in','transfer_out')", shareholderID).
+		Select("COALESCE(SUM(number_of_shares), 0)").Scan(&unlinkedTransferShares)
+	b.TotalAllocatedShares += unlinkedTransferShares
+	if b.TotalAllocatedShares < 0 {
+		b.TotalAllocatedShares = 0
+	}
+	// Transfers move fully-paid shares — reflect them in the paid display too.
+	b.PaidShares += unlinkedTransferShares
+	if b.PaidShares < 0 {
+		b.PaidShares = 0
+	}
+
 	b.UnpaidShares = b.TotalAllocatedShares - b.PaidShares
 	if b.UnpaidShares < 0 {
 		b.UnpaidShares = 0

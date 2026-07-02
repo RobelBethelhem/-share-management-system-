@@ -585,7 +585,7 @@ func RunTransferApproval(transferID uint) error {
 			dividendDate = transfer.AgreedDividendDate
 		}
 
-		// === LEGACY PATH (no lines — backward-compatible with old transfers) ===
+		// === LEGACY PATH (no lines — marketplace trades + old transfers) ===
 		if len(transfer.Lines) == 0 {
 			if err := tx.Create(&models.Investment{
 				ShareholderID:  transfer.TransferorID,
@@ -601,6 +601,28 @@ func RunTransferApproval(transferID uint) error {
 			}).Error; err != nil {
 				return err
 			}
+			// The transferee must end up with a real Allocation — capital-
+			// increase basis, share blocks and per-allocation transfers are all
+			// allocation-scoped, so a bare transfer_in investment would leave
+			// these shares invisible to them. AllocatedAmount matches the
+			// transfer_in amount so the allocation reads fully paid.
+			destAmt := transfer.TransferAmount
+			if destAmt <= 0 {
+				destAmt = float64(transfer.NumberOfShares) * transfer.ParValue
+			}
+			destAlloc := models.Allocation{
+				ShareholderID:   transfer.TransfereeID,
+				AllocationNo:    "TALLOC-" + transfer.BatchNo,
+				Round:           1,
+				AllocatedShares: transfer.NumberOfShares,
+				AllocatedAmount: destAmt,
+				AllocationDate:  dividendDate,
+				Status:          "allocated",
+				ApprovalStatus:  "approved",
+			}
+			if err := tx.Create(&destAlloc).Error; err != nil {
+				return err
+			}
 			if err := tx.Create(&models.Investment{
 				ShareholderID:  transfer.TransfereeID,
 				PaymentDate:    dividendDate,
@@ -608,6 +630,7 @@ func RunTransferApproval(transferID uint) error {
 				Amount:         transfer.TransferAmount,
 				NumberOfShares: transfer.NumberOfShares,
 				ParValue:       transfer.ParValue,
+				AllocationID:   &destAlloc.ID,
 				ReferenceNo:    transfer.BatchNo,
 				Status:         "active",
 				ApprovalStatus: "approved",

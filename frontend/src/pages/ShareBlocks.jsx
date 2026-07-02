@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Table, Button, Modal, Form, Input, Select, DatePicker, InputNumber,
   Space, Tag, message, Typography, Row, Col, Popconfirm, Card, Statistic,
@@ -119,25 +119,46 @@ export default function ShareBlocks() {
     }).catch(() => {});
   }, []);
 
-  const handleSearch = async (val) => {
-    if (!val || val.length < 1) return;
-    try {
-      const res = await searchShareholders(val);
-      setShareholders((res.data.data || []).map(s => ({
-        value: s.id, label: `${s.account_no} - ${s.first_name} ${s.last_name}`,
-      })));
-    } catch { setShareholders([]); }
+  // Dropdown label: "<account-no> / #<id> — <full name>" (first+middle+last).
+  // Backend quick-search matches name, account no, AND shareholder id — same
+  // pattern as the Subscription / Investment / Transfer modules.
+  const shareholderOption = (s) => {
+    const fullName = `${s.first_name || ''} ${s.middle_name || ''} ${s.last_name || ''}`
+      .replace(/\s+/g, ' ').trim();
+    return { value: s.id, label: `${s.account_no || '—'} / #${s.id} — ${fullName}` };
   };
 
-  const handleDropdownOpen = async (open) => {
-    if (open && shareholders.length === 0) {
+  // Cache the default first-50 list so reset (on open / on clear) is instant.
+  const defaultShListRef = useRef([]);
+  const loadDefaultShareholders = async () => {
+    if (defaultShListRef.current.length) { setShareholders(defaultShListRef.current); return; }
+    try {
+      const res = await getShareholders({ page: 1, page_size: 50 });
+      const opts = (res.data.data || []).map(shareholderOption);
+      defaultShListRef.current = opts;
+      setShareholders(opts);
+    } catch { /* ignore */ }
+  };
+
+  // Debounced search (no per-keystroke calls; single char ignored; clearing
+  // restores the full list).
+  const shSearchTimerRef = useRef(null);
+  const handleSearch = (val) => {
+    if (shSearchTimerRef.current) clearTimeout(shSearchTimerRef.current);
+    const q = (val || '').trim();
+    if (!q) { loadDefaultShareholders(); return; }
+    if (q.length < 2) return;
+    shSearchTimerRef.current = setTimeout(async () => {
       try {
-        const res = await getShareholders({ page: 1, page_size: 50 });
-        setShareholders((res.data.data || []).map(s => ({
-          value: s.id, label: `${s.account_no} - ${s.first_name} ${s.last_name}`,
-        })));
-      } catch { /* ignore */ }
-    }
+        const res = await searchShareholders(q);
+        setShareholders((res.data.data || []).map(shareholderOption));
+      } catch { setShareholders([]); }
+    }, 450);
+  };
+
+  // Reset to the full list on open so a previous search never lingers.
+  const handleDropdownOpen = (open) => {
+    if (open) loadDefaultShareholders();
   };
 
   const handleShareholderChange = async (shareholderId) => {
@@ -235,7 +256,9 @@ export default function ShareBlocks() {
     { title: 'Sh. ID', key: 'shid', width: 75, render: (_, r) => r.shareholder_id ?? r.shareholder?.id ?? '-' },
     {
       title: 'Shareholder', key: 'sh',
-      render: (_, r) => r.shareholder ? `${r.shareholder.first_name} ${r.shareholder.last_name}` : '-',
+      render: (_, r) => r.shareholder
+        ? `${r.shareholder.first_name || ''} ${r.shareholder.middle_name || ''} ${r.shareholder.last_name || ''}`.replace(/\s+/g, ' ').trim()
+        : '-',
     },
     {
       title: 'Allocation', key: 'alloc',
@@ -356,12 +379,14 @@ export default function ShareBlocks() {
           {/* ── Shareholder ── */}
           <Form.Item name="shareholder_id" label="Shareholder" rules={[{ required: true }]}>
             <Select
-              showSearch filterOption={false}
+              showSearch allowClear filterOption={false}
               onSearch={handleSearch}
               options={shareholders}
               onDropdownVisibleChange={handleDropdownOpen}
               onChange={handleShareholderChange}
-              placeholder="Search shareholder…"
+              onClear={() => loadDefaultShareholders()}
+              notFoundContent="Type 2+ chars of a name, account no, or ID"
+              placeholder="Search by name, account no, or ID…"
             />
           </Form.Item>
 

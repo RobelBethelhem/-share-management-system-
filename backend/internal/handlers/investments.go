@@ -13,6 +13,26 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// subscriptionExpiryGate rejects new payments against an allocation whose
+// subscription expiry date has passed (EAT date-only; the expiry day itself
+// still accepts payments). Extending the subscription lifts the gate. Shared
+// by direct investments (validateInvestmentCap) and dividend reinvestment.
+func subscriptionExpiryGate(alloc *models.Allocation) error {
+	if alloc.SubscriptionID == nil {
+		return nil
+	}
+	var sub models.Subscription
+	if err := database.DB.First(&sub, *alloc.SubscriptionID).Error; err != nil {
+		return nil // subscription gone (e.g. legacy) — nothing to gate on
+	}
+	if sub.ExpiryDate != nil && truncToDay(time.Now()).After(truncToDay(*sub.ExpiryDate)) {
+		return fmt.Errorf(
+			"Subscription %s expired on %s — extend it before recording new payments.",
+			sub.SubscriptionNo, truncToDay(*sub.ExpiryDate).Format("2006-01-02"))
+	}
+	return nil
+}
+
 // validateInvestmentCap checks that the proposed investment doesn't push
 // total commitments (paid + pending) above the allocation cap.
 //
@@ -54,22 +74,9 @@ func validateInvestmentCap(inv *models.Investment, excludeInvestmentID uint) (er
 		}
 
 		// Expiry gate: no new payments against a subscription whose expiry
-		// date has passed — the operator must Extend it first. The expiry day
-		// itself still accepts payments (inclusive, compared in EAT).
-		if alloc.SubscriptionID != nil {
-			var sub models.Subscription
-			if err := database.DB.First(&sub, *alloc.SubscriptionID).Error; err == nil &&
-				sub.ExpiryDate != nil &&
-				truncToDay(time.Now()).After(truncToDay(*sub.ExpiryDate)) {
-				return fmt.Errorf(
-						"Subscription %s expired on %s — extend it before recording new payments.",
-						sub.SubscriptionNo, truncToDay(*sub.ExpiryDate).Format("2006-01-02"),
-					), gin.H{
-						"subscription_no": sub.SubscriptionNo,
-						"expired":         true,
-						"expiry_date":     sub.ExpiryDate,
-					}
-			}
+		// date has passed — the operator must Extend it first.
+		if err := subscriptionExpiryGate(&alloc); err != nil {
+			return err, gin.H{"expired": true}
 		}
 
 		// (1)+(2): effective FIFO-aware approved paid shares.

@@ -675,6 +675,9 @@ export default function Dividends() {
       );
       const allocs = (res.data?.allocations || []).filter(
         a => a.payment_status !== 'fully_paid' && a.approval_status === 'approved'
+          // Expired subscription → payments (incl. dividend reinvest) are
+          // blocked until extended; keep it out of the plan and the table.
+          && !(a.subscription_expiry && dayjs().startOf('day').isAfter(dayjs(a.subscription_expiry).startOf('day')))
       );
       // Oldest first for FIFO-style fill (mirrors how computeAllocPaidShares
       // walks the pool on the backend).

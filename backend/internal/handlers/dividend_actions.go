@@ -186,6 +186,18 @@ func ReinvestDividend(c *gin.Context) {
 		return
 	}
 
+	// Same expiry gate as direct investments: when the reinvestment targets a
+	// specific allocation, its subscription must not have expired.
+	if input.AllocationID != nil && *input.AllocationID > 0 {
+		var alloc models.Allocation
+		if err := database.DB.First(&alloc, *input.AllocationID).Error; err == nil {
+			if err := subscriptionExpiryGate(&alloc); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "expired": true})
+				return
+			}
+		}
+	}
+
 	// Validate reinvest portion: must fit within (gross - already-reinvested - already-collected)
 	collectedGrossEquivalent := dividend.CollectedAmount
 	// Treat collected_amount as "net cash" — gross-equivalent depends on the
@@ -448,6 +460,12 @@ func reinvestWithDistribution(c *gin.Context, dividend *models.Dividend, input *
 		}
 		if alloc.ShareholderID != dividend.ShareholderID {
 			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Allocation %d does not belong to this shareholder", d.AllocationID)})
+			return
+		}
+		// Same expiry gate as direct investments: no dividend reinvestment
+		// into an allocation whose subscription has expired — extend first.
+		if err := subscriptionExpiryGate(&alloc); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "expired": true})
 			return
 		}
 		effPaid := computeAllocPaidShares(dividend.ShareholderID, alloc.ID)

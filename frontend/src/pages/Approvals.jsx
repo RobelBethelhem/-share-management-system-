@@ -353,6 +353,40 @@ function InvestmentBody({ detail }) {
         <Descriptions.Item label="Standing">{detail.is_standing ? <Tag color="purple">YES ({detail.standing_frequency})</Tag> : 'No'}</Descriptions.Item>
         {detail.remark && <Descriptions.Item label="Remark" span={2}>{detail.remark}</Descriptions.Item>}
       </Descriptions>
+
+      {/* Funding split for dividend-funded investments — the approver sees
+          where the money came from, not just the total. */}
+      {detail.dividend_funding && (
+        <Card size="small" title={<Space><DollarOutlined /> Funded from Dividend</Space>}
+          style={{ marginBottom: 12, borderColor: '#fa8c16' }}>
+          <Descriptions bordered size="small" column={2}>
+            <Descriptions.Item label="Dividend Source">
+              <Tag color="orange">FY {detail.dividend_funding.fiscal_year || '—'}</Tag> Dividend #{detail.dividend_funding.dividend_id}
+            </Descriptions.Item>
+            <Descriptions.Item label="Gross Dividend">{formatETB(detail.dividend_funding.gross_dividend)}</Descriptions.Item>
+            <Descriptions.Item label="From Dividend">
+              <Text strong style={{ color: '#fa8c16' }}>{formatETB(detail.dividend_funding.reinvest_amount)}</Text>
+            </Descriptions.Item>
+            <Descriptions.Item label="Additional (top-up)">
+              <Text strong>{formatETB(detail.dividend_funding.additional_amount)}</Text>
+              {detail.dividend_funding.additional_amount > 0 && detail.dividend_funding.additional_method && (
+                <Tag style={{ marginLeft: 6 }}>{detail.dividend_funding.additional_method}</Tag>
+              )}
+            </Descriptions.Item>
+            <Descriptions.Item label="Total Investment" span={2}>
+              <Text strong>{formatETB(detail.amount)}</Text>
+              <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
+                = {formatETB(detail.dividend_funding.reinvest_amount)} dividend + {formatETB(detail.dividend_funding.additional_amount)} additional
+              </Text>
+            </Descriptions.Item>
+            {detail.dividend_funding.description && (
+              <Descriptions.Item label="Detail" span={2}>
+                <Text style={{ fontSize: 12 }}>{detail.dividend_funding.description}</Text>
+              </Descriptions.Item>
+            )}
+          </Descriptions>
+        </Card>
+      )}
     </>
   );
 }
@@ -444,6 +478,13 @@ function SubscriptionBody({ detail }) {
   const sh = detail.shareholder;
   return (
     <>
+      {detail.is_reversal_pending && (
+        <Alert
+          type="warning" showIcon style={{ marginBottom: 12 }}
+          message="Reversal request"
+          description="Approving will REVERSE this subscription: its allocations and every payment made against them stop counting everywhere (transfers, blocks, dividends, capital increases) — as if the investment never happened. Rejecting keeps everything as it is."
+        />
+      )}
       <Descriptions bordered size="small" column={2} style={{ marginBottom: 12 }}>
         <Descriptions.Item label="Shareholder" span={2}>
           <Text strong>{fullName(sh)}</Text> ({sh?.account_no})

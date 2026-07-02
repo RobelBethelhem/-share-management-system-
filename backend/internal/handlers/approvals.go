@@ -74,7 +74,18 @@ func ApproveItem(c *gin.Context) {
 			return
 		}
 	case "subscription":
-		database.DB.Model(&models.Subscription{}).Where("id = ?", approval.EntityID).Update("approval_status", "approved")
+		if approval.Action == "reverse" {
+			if err := RunSubscriptionReversal(approval.EntityID, uid); err != nil {
+				approval.Status = "pending"
+				approval.ApprovedBy = nil
+				approval.ProcessedAt = nil
+				database.DB.Save(&approval)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Subscription reversal failed: " + err.Error()})
+				return
+			}
+		} else {
+			database.DB.Model(&models.Subscription{}).Where("id = ?", approval.EntityID).Update("approval_status", "approved")
+		}
 	case "block":
 		if approval.Action == "release" {
 			if err := RunBlockRelease(approval.EntityID); err != nil {
@@ -269,7 +280,18 @@ func ApproveByEntity(c *gin.Context) {
 			return
 		}
 	case "subscription":
-		database.DB.Model(&models.Subscription{}).Where("id = ?", approval.EntityID).Update("approval_status", "approved")
+		if approval.Action == "reverse" {
+			if err := RunSubscriptionReversal(approval.EntityID, uid); err != nil {
+				approval.Status = "pending"
+				approval.ApprovedBy = nil
+				approval.ProcessedAt = nil
+				database.DB.Save(&approval)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Subscription reversal failed: " + err.Error()})
+				return
+			}
+		} else {
+			database.DB.Model(&models.Subscription{}).Where("id = ?", approval.EntityID).Update("approval_status", "approved")
+		}
 	case "block":
 		if approval.Action == "release" {
 			if err := RunBlockRelease(approval.EntityID); err != nil {
@@ -372,7 +394,12 @@ func RejectByEntity(c *gin.Context) {
 	case "transfer":
 		database.DB.Model(&models.Transfer{}).Where("id = ?", approval.EntityID).Updates(rejUpdate)
 	case "subscription":
-		database.DB.Model(&models.Subscription{}).Where("id = ?", approval.EntityID).Updates(rejUpdate)
+		if approval.Action == "reverse" {
+			// Reversal rejected — the subscription stays fully effective.
+			database.DB.Model(&models.Subscription{}).Where("id = ?", approval.EntityID).Update("is_reversal_pending", false)
+		} else {
+			database.DB.Model(&models.Subscription{}).Where("id = ?", approval.EntityID).Updates(rejUpdate)
+		}
 	case "block":
 		if approval.Action == "release" {
 			// Release rejected — the block stays active; just clear the flag.
@@ -456,7 +483,12 @@ func RejectItem(c *gin.Context) {
 	case "transfer":
 		database.DB.Model(&models.Transfer{}).Where("id = ?", approval.EntityID).Updates(rejUpdate)
 	case "subscription":
-		database.DB.Model(&models.Subscription{}).Where("id = ?", approval.EntityID).Updates(rejUpdate)
+		if approval.Action == "reverse" {
+			// Reversal rejected — the subscription stays fully effective.
+			database.DB.Model(&models.Subscription{}).Where("id = ?", approval.EntityID).Update("is_reversal_pending", false)
+		} else {
+			database.DB.Model(&models.Subscription{}).Where("id = ?", approval.EntityID).Updates(rejUpdate)
+		}
 	case "block":
 		if approval.Action == "release" {
 			// Release rejected — the block stays active; just clear the flag.

@@ -121,6 +121,10 @@ type Subscription struct {
 	AmharicDate     string         `gorm:"size:50" json:"amharic_date"` // Ethiopian date, auto-filled from subscription_date
 	ExpiryDate      *time.Time     `json:"expiry_date"`
 	Status          string         `gorm:"size:30;default:'active'" json:"status"` // active, expired, reversed, extended
+	// IsReversalPending is set when a reversal has been requested and is
+	// awaiting authorization. The subscription (and its allocations/payments)
+	// stays fully effective until the reversal is approved.
+	IsReversalPending bool         `gorm:"default:false" json:"is_reversal_pending"`
 	IsProportional  bool           `gorm:"default:false" json:"is_proportional"`
 	Remark          string         `gorm:"type:text" json:"remark"`
 	ApprovalStatus  string         `gorm:"size:30;default:'pending'" json:"approval_status"`
@@ -153,6 +157,11 @@ type Allocation struct {
 	CapitalIncreaseID *uint     `gorm:"index" json:"capital_increase_id"`
 	CreatedAt       time.Time  `json:"created_at"`
 	UpdatedAt       time.Time  `json:"updated_at"`
+	// Soft delete: a reversed subscription soft-deletes its allocations so
+	// they drop out of EVERY model-based query automatically (summary, CI
+	// basis, transfer availability, share blocks, reports) — the reversal
+	// takes effect everywhere without touching each call site.
+	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
 
 	Shareholder  Shareholder  `gorm:"foreignKey:ShareholderID" json:"shareholder,omitempty"`
 	Subscription Subscription `gorm:"foreignKey:SubscriptionID" json:"subscription,omitempty"`

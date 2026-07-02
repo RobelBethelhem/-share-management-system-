@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"share-management-system/internal/models"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 func GetSubscriptions(c *gin.Context) {
@@ -181,6 +183,58 @@ func DeleteSubscription(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Subscription deleted"})
 }
 
+// subscriptionReversalGuards rejects a reversal whose side effects can't be
+// safely unwound. Returns nil when the subscription's allocations are
+// untouched by blocks and transfers.
+func subscriptionReversalGuards(sub *models.Subscription) error {
+	if sub.CapitalIncreaseID != nil {
+		return fmt.Errorf("This subscription belongs to a capital increase — manage it from the Capital Increase module")
+	}
+	var allocIDs []uint
+	database.DB.Model(&models.Allocation{}).
+		Where("subscription_id = ?", sub.ID).Pluck("id", &allocIDs)
+	if len(allocIDs) == 0 {
+		return nil
+	}
+
+	// Active blocks lock the shares — they must be released first.
+	var blocked int64
+	database.DB.Model(&models.ShareBlock{}).
+		Where("allocation_id IN ? AND is_released = ? AND approval_status <> ?", allocIDs, false, "rejected").
+		Count(&blocked)
+	if blocked > 0 {
+		return fmt.Errorf("Cannot reverse: %d active share block(s) exist on this subscription's shares. Release them first.", blocked)
+	}
+
+	// Shares already moved (or moving) by transfer can't be pulled back.
+	var transferInvs int64
+	database.DB.Model(&models.Investment{}).
+		Where("allocation_id IN ? AND payment_method IN ('transfer_in','transfer_out') AND status = 'active'", allocIDs).
+		Count(&transferInvs)
+	if transferInvs > 0 {
+		return fmt.Errorf("Cannot reverse: shares from this subscription were involved in a transfer. Reversal is only possible while the shares are untouched.")
+	}
+	var pendingLines int64
+	database.DB.Table("transfer_lines").
+		Joins("JOIN transfers ON transfers.id = transfer_lines.transfer_id").
+		Where("transfer_lines.from_allocation_id IN ? AND transfers.approval_status = ?", allocIDs, "pending").
+		Count(&pendingLines)
+	if pendingLines > 0 {
+		return fmt.Errorf("Cannot reverse: a pending transfer draws from this subscription's shares. Resolve it first.")
+	}
+	var pendingDest int64
+	database.DB.Model(&models.Transfer{}).
+		Where("to_allocation_id IN ? AND approval_status = ?", allocIDs, "pending").
+		Count(&pendingDest)
+	if pendingDest > 0 {
+		return fmt.Errorf("Cannot reverse: a pending transfer targets this subscription's allocation. Resolve it first.")
+	}
+	return nil
+}
+
+// ReverseSubscription REQUESTS a reversal (authorization required). The
+// subscription — and every payment made against it — stays fully effective
+// until an authorizer approves the reversal.
 func ReverseSubscription(c *gin.Context) {
 	id := c.Param("id")
 	var sub models.Subscription
@@ -189,30 +243,107 @@ func ReverseSubscription(c *gin.Context) {
 		return
 	}
 
-	// Only allow reversal of approved, active subscriptions
 	if sub.ApprovalStatus != "approved" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot reverse subscription that has not been approved yet"})
 		return
 	}
-	if sub.Status != "active" && sub.Status != "extended" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Only active or extended subscriptions can be reversed"})
+	if sub.Status == "reversed" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "This subscription is already reversed"})
+		return
+	}
+	if sub.IsReversalPending {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "A reversal for this subscription is already pending approval"})
+		return
+	}
+	if err := subscriptionReversalGuards(&sub); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	sub.Status = "reversed"
+	sub.IsReversalPending = true
 	database.DB.Save(&sub)
 
-	// Create approval record for audit trail
 	database.DB.Create(&models.PendingApproval{
 		EntityType:  "subscription",
 		EntityID:    sub.ID,
 		Action:      "reverse",
 		RequestedBy: getUserID(c),
-		Status:      "approved",
+		Status:      "pending",
 		RequestedAt: time.Now(),
 	})
 
-	c.JSON(http.StatusOK, gin.H{"message": "Subscription reversed"})
+	c.JSON(http.StatusOK, gin.H{"message": "Reversal requested — pending authorization"})
+}
+
+// RunSubscriptionReversal executes an APPROVED reversal: the subscription, its
+// allocations and every payment made against them cease to count anywhere —
+// as if the investment never happened. Allocations are soft-deleted (dropping
+// out of the summary, CI basis, transfers, blocks and reports automatically);
+// linked investments flip to status "reversed" so every SUM over active
+// investments excludes them; dividend-funded payments also restore their
+// dividend's ledger. actedBy is the approving user (for the dividend audit
+// trail).
+func RunSubscriptionReversal(subID uint, actedBy uint) error {
+	var sub models.Subscription
+	if err := database.DB.First(&sub, subID).Error; err != nil {
+		return err
+	}
+	if sub.Status == "reversed" {
+		return nil // already done
+	}
+	// Re-check at execution time — state may have changed since the request.
+	if err := subscriptionReversalGuards(&sub); err != nil {
+		return err
+	}
+
+	var allocIDs []uint
+	database.DB.Model(&models.Allocation{}).
+		Where("subscription_id = ?", sub.ID).Pluck("id", &allocIDs)
+
+	var linkedInvIDs []uint
+	var dividendFundedIDs []uint
+	if len(allocIDs) > 0 {
+		database.DB.Model(&models.Investment{}).
+			Where("allocation_id IN ? AND status = 'active'", allocIDs).Pluck("id", &linkedInvIDs)
+		database.DB.Model(&models.Investment{}).
+			Where("allocation_id IN ? AND status = 'active' AND payment_method = 'dividend'", allocIDs).
+			Pluck("id", &dividendFundedIDs)
+	}
+
+	err := database.DB.Transaction(func(tx *gorm.DB) error {
+		if len(linkedInvIDs) > 0 {
+			// Payments no longer count — everywhere.
+			if err := tx.Model(&models.Investment{}).Where("id IN ?", linkedInvIDs).
+				Update("status", "reversed").Error; err != nil {
+				return err
+			}
+			// Void any still-pending investment approvals for those payments.
+			if err := tx.Model(&models.PendingApproval{}).
+				Where("entity_type = 'investment' AND entity_id IN ? AND status = 'pending'", linkedInvIDs).
+				Updates(map[string]interface{}{"status": "rejected", "remark": "Subscription reversed"}).Error; err != nil {
+				return err
+			}
+		}
+		if len(allocIDs) > 0 {
+			// Soft-delete: allocations vanish from all model-based queries.
+			if err := tx.Delete(&models.Allocation{}, allocIDs).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Model(&models.Subscription{}).Where("id = ?", sub.ID).
+			Updates(map[string]interface{}{"status": "reversed", "is_reversal_pending": false}).Error
+	})
+	if err != nil {
+		return err
+	}
+
+	// Restore dividend ledgers for dividend-funded payments (idempotent; no-op
+	// for anything not sourced from a dividend). Outside the tx — it manages
+	// its own writes, mirroring the investment-rejection path.
+	for _, invID := range dividendFundedIDs {
+		ReverseDividendReinvestForInvestment(invID, actedBy)
+	}
+	return nil
 }
 
 func ExtendSubscription(c *gin.Context) {

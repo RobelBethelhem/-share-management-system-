@@ -240,11 +240,11 @@ export default function Subscriptions() {
 
   const handleReverse = async (id) => {
     try {
-      await reverseSubscription(id);
-      message.success('Subscription reversed');
+      const res = await reverseSubscription(id);
+      message.success(res.data?.message || 'Reversal requested — pending authorization');
       fetchData();
     } catch (err) {
-      message.error(err.response?.data?.error || 'Failed to reverse');
+      message.error(err.response?.data?.error || 'Failed to reverse', 8);
     }
   };
 
@@ -335,8 +335,17 @@ export default function Subscriptions() {
               </Popconfirm>
             </>
           )}
-          {r.approval_status === 'approved' && (r.status === 'active' || r.status === 'extended') && (
-            <Popconfirm title="Reverse this subscription?" onConfirm={() => handleReverse(r.id)}>
+          {r.approval_status === 'approved' && r.status !== 'reversed' && r.is_reversal_pending && (
+            <Tag color="purple">Reversal pending</Tag>
+          )}
+          {r.approval_status === 'approved' && (r.status === 'active' || r.status === 'extended' || r.status === 'expired') && !r.is_reversal_pending && (
+            <Popconfirm
+              title="Request reversal of this subscription?"
+              description="Needs authorization. On approval the subscription, its allocations AND every payment made against them stop counting everywhere — as if never invested."
+              okText="Request reversal"
+              okButtonProps={{ danger: true }}
+              onConfirm={() => handleReverse(r.id)}
+            >
               <Button size="small" danger>Reverse</Button>
             </Popconfirm>
           )}

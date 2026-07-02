@@ -19,6 +19,11 @@ import AdvancedSearchPanel from '../components/AdvancedSearchPanel';
 
 const { Title, Text } = Typography;
 
+// Subscription expiry gate: payments are blocked the day AFTER the expiry
+// date (the expiry day itself still accepts payments). Extend lifts it.
+const subExpired = (a) =>
+  !!a?.subscription_expiry && dayjs().startOf('day').isAfter(dayjs(a.subscription_expiry).startOf('day'));
+
 const statusColors = { fully_paid: 'green', partially_paid: 'orange', not_started: 'default' };
 const statusLabels = { fully_paid: 'Fully Paid', partially_paid: 'Partially Paid', not_started: 'Not Started' };
 const statusIcons = {
@@ -186,6 +191,7 @@ export default function Investments() {
       const eligible = (res.data?.allocations || []).filter(
         a => a.payment_status !== 'fully_paid'
           && (a.allocated_shares - (a.paid_shares || 0) - (a.pending_shares || 0)) > 0
+          && !subExpired(a)
       );
       if (eligible.length === 1) {
         form.setFieldValue('allocation_id', eligible[0].id);
@@ -630,9 +636,11 @@ export default function Investments() {
                     const remShares = Math.max(0, (a.allocated_shares || 0) - (a.paid_shares || 0) - (a.pending_shares || 0));
                     const remAmount = Math.max(0, (a.remaining_amount || 0) - (a.pending_amount || 0));
                     const pendingHint = a.pending_shares > 0 ? ` · ${a.pending_shares} pending` : '';
+                    const expired = subExpired(a);
                     return {
                       value: a.id,
-                      label: `${a.allocation_no} | Round ${a.round}${a.subscription_type ? ` | ${a.subscription_type}` : ''} | ${remShares.toLocaleString()} shares left${pendingHint} | ${formatCurrency(remAmount)} [${statusLabels[a.payment_status] || a.payment_status}]`,
+                      disabled: expired,
+                      label: `${a.allocation_no} | Round ${a.round}${a.subscription_type ? ` | ${a.subscription_type}` : ''} | ${remShares.toLocaleString()} shares left${pendingHint} | ${formatCurrency(remAmount)} [${expired ? `EXPIRED ${dayjs(a.subscription_expiry).format('YYYY-MM-DD')} — extend first` : statusLabels[a.payment_status] || a.payment_status}]`,
                     };
                   })}
               />

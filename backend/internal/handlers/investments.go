@@ -53,6 +53,25 @@ func validateInvestmentCap(inv *models.Investment, excludeInvestmentID uint) (er
 			return fmt.Errorf("Allocation does not belong to this shareholder"), nil
 		}
 
+		// Expiry gate: no new payments against a subscription whose expiry
+		// date has passed — the operator must Extend it first. The expiry day
+		// itself still accepts payments (inclusive, compared in EAT).
+		if alloc.SubscriptionID != nil {
+			var sub models.Subscription
+			if err := database.DB.First(&sub, *alloc.SubscriptionID).Error; err == nil &&
+				sub.ExpiryDate != nil &&
+				truncToDay(time.Now()).After(truncToDay(*sub.ExpiryDate)) {
+				return fmt.Errorf(
+						"Subscription %s expired on %s — extend it before recording new payments.",
+						sub.SubscriptionNo, truncToDay(*sub.ExpiryDate).Format("2006-01-02"),
+					), gin.H{
+						"subscription_no": sub.SubscriptionNo,
+						"expired":         true,
+						"expiry_date":     sub.ExpiryDate,
+					}
+			}
+		}
+
 		// (1)+(2): effective FIFO-aware approved paid shares.
 		effPaidShares := computeAllocPaidShares(inv.ShareholderID, alloc.ID)
 		var effPaidAmount float64
@@ -319,7 +338,47 @@ func GetInvestment(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Investment not found"})
 		return
 	}
-	c.JSON(http.StatusOK, inv)
+
+	// For dividend-funded investments, attach the funding split so the
+	// authorizer sees exactly where the money came from — not just the total.
+	// The reinvest DividendAction records the dividend portion; the remainder
+	// is the cash/bank top-up.
+	type dividendFunding struct {
+		DividendID       uint    `json:"dividend_id"`
+		FiscalYear       string  `json:"fiscal_year"`
+		GrossDividend    float64 `json:"gross_dividend"`
+		ReinvestAmount   float64 `json:"reinvest_amount"`
+		AdditionalAmount float64 `json:"additional_amount"`
+		AdditionalMethod string  `json:"additional_method"`
+		Description      string  `json:"description"`
+	}
+	resp := struct {
+		models.Investment
+		DividendFunding *dividendFunding `json:"dividend_funding,omitempty"`
+	}{Investment: inv}
+
+	var action models.DividendAction
+	if err := database.DB.Where("investment_id = ? AND action_type = ?", inv.ID, "reinvest").
+		First(&action).Error; err == nil {
+		f := dividendFunding{
+			DividendID:       action.DividendID,
+			ReinvestAmount:   action.Amount,
+			AdditionalMethod: action.PaymentMethod,
+			Description:      action.Description,
+		}
+		f.AdditionalAmount = inv.Amount - action.Amount
+		if f.AdditionalAmount < 0 {
+			f.AdditionalAmount = 0
+		}
+		var div models.Dividend
+		if err := database.DB.First(&div, action.DividendID).Error; err == nil {
+			f.FiscalYear = div.FiscalYear
+			f.GrossDividend = div.GrossDividend
+		}
+		resp.DividendFunding = &f
+	}
+
+	c.JSON(http.StatusOK, resp)
 }
 
 // validateWholeShareAmount enforces that a normal (non-dividend) investment buys
@@ -372,10 +431,12 @@ func CreateInvestment(c *gin.Context) {
 		return
 	}
 
-	// Check for double payment (same shareholder, same date, same amount)
+	// Check for double payment (same shareholder, same date, same amount).
+	// Only ACTIVE rows count — after a subscription reversal the shareholder
+	// may legitimately re-pay the same amount on the same date.
 	var exists int64
 	database.DB.Model(&models.Investment{}).
-		Where("shareholder_id = ? AND amount = ? AND DATE(payment_date) = DATE(?)",
+		Where("shareholder_id = ? AND amount = ? AND DATE(payment_date) = DATE(?) AND status = 'active'",
 			inv.ShareholderID, inv.Amount, inv.PaymentDate).
 		Count(&exists)
 	if exists > 0 {
@@ -489,6 +550,7 @@ func GetShareholderInvestmentSummary(c *gin.Context) {
 		Status              string     `json:"status"`
 		ApprovalStatus      string     `json:"approval_status"`
 		SubscriptionType    string     `json:"subscription_type"`
+		SubscriptionExpiry  *time.Time `json:"subscription_expiry"` // payments blocked after this day (extend to lift)
 		PaidAmount          float64    `json:"paid_amount"`
 		PaidShares          int64      `json:"paid_shares"`
 		// Pending direct investments waiting on approval. The form uses these
@@ -556,8 +618,10 @@ func GetShareholderInvestmentSummary(c *gin.Context) {
 		}
 
 		subType := ""
+		var subExpiry *time.Time
 		if a.Subscription.ID > 0 {
 			subType = a.Subscription.Type
+			subExpiry = a.Subscription.ExpiryDate
 		}
 
 		// Block counts broken down by type so the transfer form can show precise available shares.
@@ -593,6 +657,7 @@ func GetShareholderInvestmentSummary(c *gin.Context) {
 			Status:              a.Status,
 			ApprovalStatus:      a.ApprovalStatus,
 			SubscriptionType:    subType,
+			SubscriptionExpiry:  subExpiry,
 			PaidAmount:          paid,
 			PaidShares:          paidShares,
 			PendingShares:       pendingSharesOnAlloc,

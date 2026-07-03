@@ -156,7 +156,14 @@ func validateInvestmentCap(inv *models.Investment, excludeInvestmentID uint) (er
 		Where("shareholder_id = ? AND approval_status = 'approved'", inv.ShareholderID).
 		Select("COALESCE(SUM(allocated_shares), 0)").Scan(&totalAllocatedShares)
 	if totalAllocated <= 0 {
-		return nil, nil
+		// ZERO subscription/allocation capacity → no investment. This used to
+		// be skipped ("early payments before allocation are legitimate"),
+		// which let a shareholder with no — or a fully reversed — subscription
+		// record any amount. The business rule is now: money in requires
+		// allocation capacity to apply it to.
+		return fmt.Errorf(
+			"This shareholder has no approved allocation to invest against. Create and approve a subscription/allocation first.",
+		), gin.H{"total_allocated": 0, "attempted": inv.Amount, "zero_subscription": true}
 	}
 
 	q := database.DB.Model(&models.Investment{}).

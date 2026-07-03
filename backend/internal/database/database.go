@@ -97,9 +97,30 @@ func Initialize(cfg *config.Config) *gorm.DB {
 
 	SeedDefaultData(DB)
 	backfillLegacyTransferAllocations(DB)
+	reactivateShareholdersWithHoldings(DB)
 
 	fmt.Println("Database connected and migrated successfully")
 	return DB
+}
+
+// reactivateShareholdersWithHoldings flips DORMANT shareholders who still hold
+// a positive net share balance back to active. A shareholder could end up
+// dormant (via a full transfer out) and later RECEIVE shares by transfer —
+// but stay dormant, which silently excluded them from capital-increase rounds
+// and dividend processing despite being real holders. Transfers now
+// reactivate the transferee on approval; this repairs existing rows once.
+func reactivateShareholdersWithHoldings(db *gorm.DB) {
+	res := db.Exec(`UPDATE shareholders s SET s.status = 'active'
+		WHERE s.status = 'dormant'
+		AND (SELECT COALESCE(SUM(i.number_of_shares), 0) FROM investments i
+			WHERE i.shareholder_id = s.id AND i.status = 'active' AND i.approval_status = 'approved') > 0`)
+	if res.Error != nil {
+		log.Printf("reactivate holders: %v", res.Error)
+		return
+	}
+	if res.RowsAffected > 0 {
+		fmt.Printf("Reactivated %d dormant shareholder(s) with positive holdings\n", res.RowsAffected)
+	}
 }
 
 // backfillLegacyTransferAllocations creates an Allocation for every approved

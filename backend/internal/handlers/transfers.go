@@ -587,19 +587,77 @@ func RunTransferApproval(transferID uint) error {
 
 		// === LEGACY PATH (no lines — marketplace trades + old transfers) ===
 		if len(transfer.Lines) == 0 {
-			if err := tx.Create(&models.Investment{
-				ShareholderID:  transfer.TransferorID,
-				PaymentDate:    dividendDate,
-				PaymentMethod:  "transfer_out",
-				Amount:         -transfer.TransferAmount,
-				NumberOfShares: -transfer.NumberOfShares,
-				ParValue:       transfer.ParValue,
-				ReferenceNo:    transfer.BatchNo,
-				Status:         "active",
-				ApprovalStatus: "approved",
-				Remark:         "Transfer out - " + transfer.BatchNo,
-			}).Error; err != nil {
+			// Build a FIFO consumption plan over the transferor's allocations
+			// (oldest first), capped by each allocation's available PAID shares
+			// (same math the multi-line path validates against). This both
+			// REJECTS over-transfers — this path used to execute with no
+			// availability check at all — and shrinks the source allocations +
+			// links the negative rows, so the seller's per-allocation
+			// availability reflects reality and the same shares can't be
+			// transferred again later.
+			var srcAllocs []models.Allocation
+			if err := tx.Where("shareholder_id = ?", transfer.TransferorID).
+				Order("id ASC").Find(&srcAllocs).Error; err != nil {
 				return err
+			}
+			type fifoTake struct {
+				allocID uint
+				shares  int64
+			}
+			remaining := transfer.NumberOfShares
+			var plan []fifoTake
+			for _, a := range srcAllocs {
+				if remaining <= 0 {
+					break
+				}
+				availPaid := computeAllocPaidShares(transfer.TransferorID, a.ID) - getEffectivePaidBlocked(a.ID)
+				// Shares already reserved by pending multi-line transfers.
+				var pendingPaidOut int64
+				tx.Table("transfer_lines").
+					Joins("JOIN transfers ON transfers.id = transfer_lines.transfer_id").
+					Where("transfer_lines.from_allocation_id = ? AND transfers.approval_status = ?", a.ID, "pending").
+					Select("COALESCE(SUM(transfer_lines.paid_shares_to_transfer), 0)").Scan(&pendingPaidOut)
+				availPaid -= pendingPaidOut
+				if availPaid <= 0 {
+					continue
+				}
+				take := availPaid
+				if take > remaining {
+					take = remaining
+				}
+				plan = append(plan, fifoTake{allocID: a.ID, shares: take})
+				remaining -= take
+			}
+			if remaining > 0 {
+				return fmt.Errorf(
+					"insufficient shares: transferor has %d fewer available paid share(s) than the %d requested (blocked/pending shares excluded)",
+					remaining, transfer.NumberOfShares)
+			}
+
+			for _, p := range plan {
+				allocIDCopy := p.allocID
+				if err := tx.Create(&models.Investment{
+					ShareholderID:  transfer.TransferorID,
+					PaymentDate:    dividendDate,
+					PaymentMethod:  "transfer_out",
+					Amount:         -float64(p.shares) * transfer.ParValue,
+					NumberOfShares: -p.shares,
+					ParValue:       transfer.ParValue,
+					AllocationID:   &allocIDCopy,
+					ReferenceNo:    transfer.BatchNo,
+					Status:         "active",
+					ApprovalStatus: "approved",
+					Remark:         fmt.Sprintf("Transfer out alloc %d - %s", p.allocID, transfer.BatchNo),
+				}).Error; err != nil {
+					return err
+				}
+				if err := tx.Model(&models.Allocation{}).Where("id = ?", p.allocID).
+					Updates(map[string]interface{}{
+						"allocated_shares": gorm.Expr("allocated_shares - ?", p.shares),
+						"allocated_amount": gorm.Expr("allocated_amount - ?", float64(p.shares)*transfer.ParValue),
+					}).Error; err != nil {
+					return err
+				}
 			}
 			// The transferee must end up with a real Allocation — capital-
 			// increase basis, share blocks and per-allocation transfers are all
@@ -638,6 +696,12 @@ func RunTransferApproval(transferID uint) error {
 			}).Error; err != nil {
 				return err
 			}
+			// Receiving shares makes the transferee an ACTIVE shareholder —
+			// otherwise a dormant recipient stays invisible to capital
+			// increases and dividend processing despite holding shares.
+			tx.Model(&models.Shareholder{}).
+				Where("id = ? AND status <> ?", transfer.TransfereeID, "active").
+				Update("status", "active")
 			if transfer.IsFullTransfer {
 				tx.Model(&models.Shareholder{}).Where("id = ?", transfer.TransferorID).Update("status", "dormant")
 			}
@@ -747,6 +811,13 @@ func RunTransferApproval(transferID uint) error {
 				// Destination was already sized for the full total in Step 1.
 			}
 		}
+
+		// Receiving shares makes the transferee an ACTIVE shareholder —
+		// otherwise a dormant recipient stays invisible to capital increases
+		// and dividend processing despite holding shares.
+		tx.Model(&models.Shareholder{}).
+			Where("id = ? AND status <> ?", transfer.TransfereeID, "active").
+			Update("status", "active")
 
 		// Step 3: Dormant check
 		if transfer.IsFullTransfer {

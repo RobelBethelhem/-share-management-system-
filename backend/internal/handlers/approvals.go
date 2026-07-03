@@ -218,15 +218,24 @@ func executeTradeApproval(tradeID uint) {
 
 	// Link transfer to trade request
 	trade.TransferID = &transfer.ID
-	trade.Status = "completed"
 	database.DB.Save(&trade)
 
-	// Update listing status
+	// Execute the actual share transfer FIRST — it now validates the seller's
+	// available paid shares (FIFO) and fails on over-transfer. Only a
+	// successful execution completes the trade and its listing.
+	if err := RunTransferApproval(transfer.ID); err != nil {
+		trade.Status = "failed"
+		database.DB.Save(&trade)
+		database.DB.Model(&models.Transfer{}).Where("id = ?", transfer.ID).
+			Updates(map[string]interface{}{"status": "rejected", "approval_status": "rejected", "rejection_reason": err.Error()})
+		fmt.Println("trade execution failed:", trade.ID, err)
+		return
+	}
+
+	trade.Status = "completed"
+	database.DB.Save(&trade)
 	database.DB.Model(&models.ShareListing{}).Where("id = ?", trade.ListingID).
 		Update("status", "completed")
-
-	// Execute the actual share transfer
-	RunTransferApproval(transfer.ID) //nolint:errcheck — trade approvals are fire-and-forget
 }
 
 func getTradeSettingFloat(key string, defaultVal float64) float64 {

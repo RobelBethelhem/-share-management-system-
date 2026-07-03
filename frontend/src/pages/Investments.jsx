@@ -614,6 +614,16 @@ export default function Investments() {
             </Card>
           )}
 
+          {/* Zero subscription/allocation → investment is not possible; the
+              backend rejects it too. Surface it up-front for the operator. */}
+          {summary && (summary.allocations || []).filter(a => a.approval_status === 'approved').length === 0 && (
+            <Alert
+              type="warning" showIcon style={{ marginBottom: 12 }}
+              message="No approved allocation"
+              description="This shareholder has no approved subscription/allocation to invest against. Create and approve a subscription first."
+            />
+          )}
+
           {/* Allocation selector — only show unpaid/partially paid allocations.
               Required when any eligible allocation exists, so the strict
               per-allocation cap is always enforced; the unlinked fallback
